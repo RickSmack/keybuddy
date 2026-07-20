@@ -598,7 +598,6 @@ let lastProbe = null, lastCanvas = null;
 let scanStartedAt = 0;      // when the current scanning run began
 let lastMotionAt = 0;       // last time motion was detected
 let motionPrev = null;      // previous downscaled frame for motion diff
-let idFrozen = false;       // true once the user captures — ranking is held still
 let smoothScores = {};      // keyId -> smoothed score (EMA across frames)
 const ID_INTERVAL = 1200;   // ms between inference attempts
 const MOTION_THRESH = 8;    // mean per-pixel gray delta counted as "motion"
@@ -621,17 +620,14 @@ function enterIdentify() {
 function startIdLoop() {
   if (idLoopActive) return;
   idLoopActive = true;
-  idFrozen = false;
   smoothScores = {};          // start smoothing fresh each scan session
   const now = performance.now();
   scanStartedAt = now;
   lastMotionAt = now;
   motionPrev = null;
   hideScanPaused();
-  // While scanning live: show the "capture/lock in" button, hide the retry button.
-  $("#idCaptureBtn").hidden = false;
-  $("#idCaptureBtn").innerHTML = "🔒 Lock in this guess";
-  $("#idRetryBtn").hidden = true;
+  // Live scanning: no capture button needed (results are continuous).
+  $("#idCaptureBtn").hidden = true;
   $("#idResults").innerHTML = "";
   $("#idGuideText").textContent = "Point at a key — matching automatically…";
   scheduleIdTick(300);
@@ -722,7 +718,7 @@ async function idTick() {
     Object.keys(smoothScores).forEach((id) => { if (!seen.has(id)) delete smoothScores[id]; });
     const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
       .sort((a, b) => b.score - a.score).slice(0, 3);
-    if (!idFrozen) renderIdResults(ranked); // don't re-render once the user locks in
+    renderIdResults(ranked);
   } catch (e) {
     /* transient frame error — just try again next tick */
   } finally {
@@ -731,22 +727,15 @@ async function idTick() {
   }
 }
 
-// Resume scanning after an auto-pause (button or tapping the camera view).
+// Resume identifying after an auto-pause (button or tapping the camera view).
 on("#idResumeBtn", "click", startIdLoop);
 on("#idCameraWrap", "click", () => {
   const c = cams.id;
   if (settings.autoScan && !idLoopActive && c && !c.usesFile) startIdLoop();
 });
 
-// Capture button. Two modes:
-//  - Live auto-scan: "Lock in this guess" — freeze the current ranking so it
-//    stops re-ordering while you verify. Retry button resumes scanning.
-//  - File fallback (no live camera): capture a photo and identify once.
+// Capture button — only used in the file-fallback path (no live camera).
 on("#idCaptureBtn", "click", async () => {
-  const c = cams.id;
-  const liveScanning = idLoopActive && c && !c.usesFile;
-  if (liveScanning) { freezeIdResults(); return; }
-
   const btn = $("#idCaptureBtn");
   const canvas = await capture("id");
   if (!canvas) return;
@@ -760,38 +749,10 @@ on("#idCaptureBtn", "click", async () => {
     keys.forEach((k) => { smoothScores[k.id] = keyScore(probe, k); });
     const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
       .sort((a, b) => b.score - a.score).slice(0, 3);
-    idFrozen = true;
     renderIdResults(ranked);
-    $("#idRetryBtn").hidden = false;
   } finally {
     btn.disabled = false;
-    btn.hidden = true; // file mode: hide capture until retry
     btn.innerHTML = "📸 Capture &amp; Identify";
-  }
-});
-
-// Freeze the live ranking into a calm review state (stops re-ordering).
-function freezeIdResults() {
-  idFrozen = true;
-  stopIdLoop();
-  hideScanPaused();
-  $("#idCaptureBtn").hidden = true;
-  $("#idRetryBtn").hidden = false;
-  $("#idGuideText").textContent = "Locked — tap the correct key, or scan again";
-}
-
-// Retry: clear the freeze and resume live scanning.
-on("#idRetryBtn", "click", () => {
-  const c = cams.id;
-  $("#idRetryBtn").hidden = true;
-  if (c && !c.usesFile) {
-    startIdLoop();
-  } else {
-    // file fallback: just re-enable capture
-    idFrozen = false;
-    $("#idResults").innerHTML = "";
-    $("#idCaptureBtn").hidden = false;
-    $("#idGuideText").textContent = "Tap Capture to identify a key";
   }
 });
 
@@ -805,13 +766,9 @@ function renderIdResults(ranked) {
   } else {
     const top = Math.round(ranked[0].score * 100);
     const topName = isUnidentified(ranked[0].key) ? "Unidentified key" : ranked[0].key.for;
-    if (idFrozen) {
-      guide.textContent = `Locked on "${topName}" (${top}%) — or Scan again`;
-    } else if (ranked[0].score >= 0.55) {
-      guide.textContent = `Best: ${topName} (${top}%) — Lock in to hold the list steady`;
-    } else {
-      guide.textContent = `Best guess ${top}% — hold steady, or Lock in`;
-    }
+    guide.textContent = ranked[0].score >= 0.55
+      ? `Best match: ${topName} (${top}%)`
+      : `Best guess ${top}% — hold steady`;
     html = "<h3>Likely matches</h3>";
     ranked.forEach((r) => {
       const pct = Math.round(r.score * 100);
@@ -839,33 +796,94 @@ function renderIdResults(ranked) {
   }
   box.innerHTML = html;
 
-  // Opt-in learning only — tapping a row does nothing destructive.
+  // Opt-in learning goes through a confirm dialog, so a last-instant re-order
+  // can't cause you to teach the wrong key.
   $$("#idResults .teach-btn[data-id]").forEach((el) => {
-    el.addEventListener("click", (e) => { e.stopPropagation(); teachKey(el.dataset.id); });
+    el.addEventListener("click", (e) => { e.stopPropagation(); askTeachKey(el.dataset.id); });
   });
   $("#idAddNew").addEventListener("click", () => beginAddFromCapture());
 }
 
 let pendingCapture = null;
+const teachDlg = $("#teachDialog");
 
-// Opt-in: add the current probe as an extra reference fingerprint for a key,
-// improving future matches. Explicit action, so no accidental poisoning.
-async function teachKey(id) {
+// Show a confirmation naming the exact key + the photo about to be added.
+async function askTeachKey(id) {
   const key = await getKey(id);
   if (!key) return;
-  const probe = lastProbe;
-  if (!probe) { toast("No captured image to learn from."); return; }
-  key.fingerprints = key.fingerprints || [];
-  const learned = key.fingerprints.filter((f) => f && f.source === "learn").length;
+  if (!lastProbe || !lastCanvas) { toast("No captured image to learn from."); return; }
+  const learned = (key.fingerprints || []).filter((f) => f && f.source === "learn").length;
   if (learned >= 5) { toast("Enough learned views already (5)."); return; }
-  // Tag this fingerprint as learned so it's counted separately from enrollment.
-  key.fingerprints.push({ ...probe, source: "learn" });
-  key.updatedAt = new Date().toISOString();
-  await putKey(key);
-  const newLearned = learned + 1;
-  toast(`✓ Improved: ${key.for || "Unidentified key"} (${newLearned}/5 learned)`);
-  const btn = $(`#idResults .teach-btn[data-id="${id}"]`);
-  if (btn && newLearned >= 5) { btn.textContent = "✓ trained"; btn.disabled = true; }
+  // Snapshot the current probe/photo so a re-render can't swap them mid-confirm.
+  const probe = lastProbe;
+  const thumb = canvasToThumb(lastCanvas);
+  const wasScanning = idLoopActive;
+  stopIdLoop(); // hold still while the dialog is open
+
+  $("#teachDlgBody").innerHTML =
+    `<img src="${thumb}" alt="" style="width:64px;height:64px;border-radius:10px;object-fit:cover" />
+     <div><strong>${keyLabel(key)}</strong>${key.category ? "<br><span style='color:var(--muted);font-size:12px'>" + escapeHtml(key.category) + "</span>" : ""}</div>`;
+  $("#teachDlgText").textContent = `Add this photo to "${key.for || "Unidentified key"}" so it's recognized better next time? (${learned + 1}/5 learned)`;
+  teachDlg.showModal();
+
+  const cleanup = () => {
+    teachDlg.close();
+    if (wasScanning && $("#view-identify").classList.contains("active")) startIdLoop();
+  };
+  $("#teachDlgYes").onclick = async () => {
+    const fresh = await getKey(id);
+    if (fresh) {
+      fresh.fingerprints = fresh.fingerprints || [];
+      const l = fresh.fingerprints.filter((f) => f && f.source === "learn").length;
+      if (l < 5) {
+        fresh.fingerprints.push({ ...probe, source: "learn", thumb });
+        fresh.updatedAt = new Date().toISOString();
+        await putKey(fresh);
+        toast(`✓ Improved: ${fresh.for || "Unidentified key"} (${l + 1}/5 learned)`);
+      } else {
+        toast("Enough learned views already (5).");
+      }
+    }
+    cleanup();
+  };
+  $("#teachDlgNo").onclick = cleanup;
+}
+
+// Review a key's learned improvement photos; tap one to delete it.
+const learnedDlg = $("#learnedDialog");
+async function reviewLearned(id) {
+  const key = await getKey(id);
+  if (!key) return;
+  const render = () => {
+    const learned = (key.fingerprints || [])
+      .map((f, idx) => ({ f, idx }))
+      .filter((o) => o.f && o.f.source === "learn");
+    $("#learnedDlgTitle").textContent = `Improvement photos · ${key.for || "Unidentified key"}`;
+    const grid = $("#learnedGrid");
+    if (!learned.length) {
+      grid.innerHTML = '<p class="hint" style="margin:0">No improvement photos left.</p>';
+    } else {
+      grid.innerHTML = learned.map((o) =>
+        `<button class="learned-cell" data-idx="${o.idx}" title="Tap to delete">
+           <img src="${o.f.thumb || ""}" alt="" />
+           <span class="del-x">×</span>
+         </button>`).join("");
+      $$("#learnedGrid .learned-cell").forEach((cell) =>
+        cell.addEventListener("click", async () => {
+          const i = +cell.dataset.idx;
+          if (!confirm("Delete this improvement photo?")) return;
+          key.fingerprints.splice(i, 1);
+          key.updatedAt = new Date().toISOString();
+          await putKey(key);
+          toast("Improvement photo deleted");
+          render();          // refresh dialog
+          renderKeys();      // refresh underlying list counts
+        }));
+    }
+  };
+  render();
+  learnedDlg.showModal();
+  $("#learnedDlgClose").onclick = () => learnedDlg.close();
 }
 
 function beginAddFromCapture() {
@@ -1259,12 +1277,14 @@ async function renderKeys() {
     box.innerHTML = '<div class="empty">No keys here yet.</div>';
     return;
   }
-  box.innerHTML = list.map((k) => `
+  box.innerHTML = list.map((k) => {
+    const learnedCount = (k.fingerprints || []).filter((f) => f && f.source === "learn").length;
+    return `
     <div class="key-item">
       <img class="thumb" src="${k.thumbnails?.[0] || ""}" alt="" />
       <div class="meta">
         <div class="name">${keyLabel(k)}</div>
-        <div class="sub">${isUnidentified(k) ? "🔎 needs identifying · " : ""}${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${(k.locations && k.locations.length) ? "📍 " + k.locations.map(escapeHtml).join(", ") + " · " : ""}${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
+        <div class="sub">${isUnidentified(k) ? "🔎 needs identifying · " : ""}${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${(k.locations && k.locations.length) ? "📍 " + k.locations.map(escapeHtml).join(", ") + " · " : ""}${k.date ? k.date + " · " : ""}${(k.thumbnails || []).length} photo(s)${learnedCount ? " · " + learnedCount + " learned" : ""}${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
       </div>
       <span class="badge ${k.status || "active"}">${k.status === "obsolete" ? "decommissioned" : (k.status || "active")}</span>
     </div>
@@ -1276,9 +1296,12 @@ async function renderKeys() {
       <button class="btn secondary toggle-btn">${(k.status === "obsolete") ? "Reactivate" : "Decommission"}</button>
       <button class="btn danger del-btn">Delete</button>
     </div>
-  `).join("");
+    ${learnedCount ? `<div style="padding:0 12px 12px" data-id="${k.id}"><button class="btn secondary learned-btn">🖼️ Review ${learnedCount} improvement photo(s)</button></div>` : ""}
+  `; }).join("");
   $$("#keysList .find-btn").forEach((b) =>
     b.addEventListener("click", () => startFindInPile(b.closest("[data-id]").dataset.id)));
+  $$("#keysList .learned-btn").forEach((b) =>
+    b.addEventListener("click", () => reviewLearned(b.closest("[data-id]").dataset.id)));
   $$("#keysList .edit-btn").forEach((b) =>
     b.addEventListener("click", () => editKey(b.closest("[data-id]").dataset.id)));
   $$("#keysList .toggle-btn").forEach((b) =>

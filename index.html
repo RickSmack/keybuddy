@@ -32,9 +32,8 @@
       </div>
     </div>
     <div class="cam-controls">
-      <button class="btn" id="idCaptureBtn" hidden>🔒 Lock in this guess</button>
-      <button class="btn" id="idResumeBtn" hidden>▶️ Resume scanning</button>
-      <button class="btn secondary" id="idRetryBtn" hidden>↻ Scan again</button>
+      <button class="btn" id="idCaptureBtn" hidden>📸 Capture &amp; Identify</button>
+      <button class="btn" id="idResumeBtn" hidden>▶️ Resume identifying</button>
     </div>
     <input type="file" accept="image/*" capture="environment" id="idFileInput" hidden />
     <p class="hint" id="idFallbackHint" hidden>Camera unavailable — tap Capture to take/pick a photo.</p>
@@ -193,6 +192,23 @@
 </nav>
 
 <div class="toast" id="toast"></div>
+
+<!-- Confirm before teaching a key (defeats any last-instant re-order) -->
+<dialog id="teachDialog">
+  <h3 style="margin-top:0">Improve this key?</h3>
+  <div id="teachDlgBody" style="display:flex;gap:12px;align-items:center;margin-bottom:8px"></div>
+  <p class="hint" id="teachDlgText" style="margin-top:0"></p>
+  <button class="btn" id="teachDlgYes">Yes, add this photo</button>
+  <button class="btn secondary" id="teachDlgNo" style="margin-top:10px">Cancel</button>
+</dialog>
+
+<!-- Review / delete a key's learned improvement photos -->
+<dialog id="learnedDialog">
+  <h3 style="margin-top:0" id="learnedDlgTitle">Improvement photos</h3>
+  <p class="hint" style="margin-top:0">Tap a photo to delete it if it's a bad capture. Enrollment photos aren't shown here.</p>
+  <div id="learnedGrid" class="learned-grid"></div>
+  <button class="btn secondary" id="learnedDlgClose" style="margin-top:12px">Close</button>
+</dialog>
 
 <!-- Self-hosted libraries (served from this origin; cached offline by the service worker) -->
 <script src="vendor/tf.min.js"></script>
