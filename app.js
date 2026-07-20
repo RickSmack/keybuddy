@@ -65,17 +65,24 @@ function setModelStatus(state, label) {
   $("#modelLabel").textContent = label;
 }
 async function loadModel() {
-  setModelStatus("loading", "loading model…");
+  setModelStatus("loading", "preparing…");
   try {
     await tf.ready();
-    const full = await tf.loadLayersModel("vendor/mobilenet/model.json");
+    // The model weights are a one-time ~17 MB download (then cached offline).
+    // Show percent so the first load never looks frozen.
+    const full = await tf.loadLayersModel("vendor/mobilenet/model.json", {
+      onProgress: (frac) => setModelStatus("loading", `downloading model ${Math.round(frac * 100)}%`),
+    });
+    setModelStatus("loading", "warming up…");
     const embedLayer = full.getLayer(EMBED_LAYER);
     embedModel = tf.model({ inputs: full.inputs, outputs: embedLayer.output });
-    // warm up
     const warm = tf.zeros([1, CAP, CAP, 3]);
     embedModel.predict(warm).dispose();
     warm.dispose();
     setModelStatus("ready", "ready");
+    // Now that the app is interactive, warm OpenCV in the background so the
+    // background-masking preprocessing is ready before the first capture.
+    ensureOpenCV();
   } catch (e) {
     console.error(e);
     setModelStatus("error", "model offline");
@@ -97,15 +104,25 @@ function toWorkCanvas(src, sw, sh) {
   return c;
 }
 
-/* ---------- Tier 0: OpenCV preprocessing ---------- */
-// True once the async opencv.js runtime has finished initializing.
+/* ---------- Tier 0: OpenCV preprocessing (lazy-loaded) ---------- */
+// OpenCV.js is ~10 MB, so we don't load it up front. It's fetched in the
+// background the first time we fingerprint a key; until it's ready, captures
+// still work using the plain crop (matching just isn't background-masked yet).
 let cvReady = false;
-if (typeof window !== "undefined") {
-  // opencv.js sets Module.onRuntimeInitialized; poll as a robust fallback.
-  const cvPoll = setInterval(() => {
-    if (window.cv && cv.Mat) { cvReady = true; clearInterval(cvPoll); }
-  }, 200);
-  setTimeout(() => clearInterval(cvPoll), 20000);
+let cvRequested = false;
+function ensureOpenCV() {
+  if (cvRequested || typeof document === "undefined") return;
+  cvRequested = true;
+  const s = document.createElement("script");
+  s.src = "vendor/opencv.js";
+  s.async = true;
+  s.onload = () => {
+    const poll = setInterval(() => {
+      if (window.cv && cv.Mat) { cvReady = true; clearInterval(poll); }
+    }, 150);
+    setTimeout(() => clearInterval(poll), 20000);
+  };
+  document.head.appendChild(s);
 }
 
 // Neutral fill for masked-out (non-key) pixels — mid-gray so the embedding
@@ -119,7 +136,7 @@ const MASK_FILL = 128;
 // Returns a CAP-square canvas with the key on a neutral field. Falls back to
 // the plain center crop if OpenCV isn't ready or no confident contour is found.
 function refineKeyCrop(workCanvas) {
-  if (!cvReady) return workCanvas;
+  if (!cvReady) { ensureOpenCV(); return workCanvas; } // load in bg; use plain crop meanwhile
   let src, gray, blur, edges, contours, hier, mask, masked, rotated, maskRot, roi, M;
   try {
     src = cv.imread(workCanvas);

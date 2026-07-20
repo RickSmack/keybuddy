@@ -1,16 +1,16 @@
 /* Key Buddy service worker — everything is self-hosted (same origin) now.
    Caches the app shell and the vendored ML assets so the tool works offline
    after the first successful online load. */
-const CACHE = "keybuddy-v2";
+const CACHE = "keybuddy-v3";
 
-// App shell — cached up front on install.
+// App shell — cached up front on install. OpenCV.js is intentionally NOT here:
+// it's lazy-loaded on first use and then cached by the /vendor/ fetch rule.
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
   "./vendor/tf.min.js",
-  "./vendor/opencv.js",
   "./vendor/mobilenet/model.json",
 ];
 
