@@ -588,15 +588,17 @@ let lastProbe = null, lastCanvas = null;
 let scanStartedAt = 0;      // when the current scanning run began
 let lastMotionAt = 0;       // last time motion was detected
 let motionPrev = null;      // previous downscaled frame for motion diff
+let idFrozen = false;       // true once the user captures — ranking is held still
+let smoothScores = {};      // keyId -> smoothed score (EMA across frames)
 const ID_INTERVAL = 1200;   // ms between inference attempts
 const MOTION_THRESH = 8;    // mean per-pixel gray delta counted as "motion"
+const SCORE_EMA = 0.5;      // smoothing weight for new frames (0..1; lower = steadier)
 
 // Called when entering the Identify view: start auto-scan if enabled,
 // otherwise fall back to the manual capture button.
 function enterIdentify() {
   const c = cams.id;
   if (settings.autoScan && !(c && c.usesFile)) {
-    $("#idCaptureBtn").hidden = true;
     startIdLoop();
   } else {
     stopIdLoop();
@@ -609,11 +611,18 @@ function enterIdentify() {
 function startIdLoop() {
   if (idLoopActive) return;
   idLoopActive = true;
+  idFrozen = false;
+  smoothScores = {};          // start smoothing fresh each scan session
   const now = performance.now();
   scanStartedAt = now;
   lastMotionAt = now;
   motionPrev = null;
   hideScanPaused();
+  // While scanning live: show the "capture/lock in" button, hide the retry button.
+  $("#idCaptureBtn").hidden = false;
+  $("#idCaptureBtn").innerHTML = "🔒 Lock in this guess";
+  $("#idRetryBtn").hidden = true;
+  $("#idResults").innerHTML = "";
   $("#idGuideText").textContent = "Point at a key — matching automatically…";
   scheduleIdTick(300);
 }
@@ -692,9 +701,18 @@ async function idTick() {
     // Identify against ALL keys, including decommissioned ones — a key you're
     // holding may well be one that was previously decommissioned.
     const keys = await getAllKeys();
-    const ranked = keys.map((k) => ({ key: k, score: keyScore(probe, k) }))
+    // Smooth each key's score over frames (EMA) so ranking doesn't flip on noise.
+    const seen = new Set();
+    keys.forEach((k) => {
+      const raw = keyScore(probe, k);
+      const prev = smoothScores[k.id];
+      smoothScores[k.id] = prev == null ? raw : prev + SCORE_EMA * (raw - prev);
+      seen.add(k.id);
+    });
+    Object.keys(smoothScores).forEach((id) => { if (!seen.has(id)) delete smoothScores[id]; });
+    const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
       .sort((a, b) => b.score - a.score).slice(0, 3);
-    renderIdResults(ranked);
+    if (!idFrozen) renderIdResults(ranked); // don't re-render once the user locks in
   } catch (e) {
     /* transient frame error — just try again next tick */
   } finally {
@@ -710,8 +728,15 @@ $("#idCameraWrap").addEventListener("click", () => {
   if (settings.autoScan && !idLoopActive && c && !c.usesFile) startIdLoop();
 });
 
-// Manual button: used only in the no-camera file-fallback path.
+// Capture button. Two modes:
+//  - Live auto-scan: "Lock in this guess" — freeze the current ranking so it
+//    stops re-ordering while you verify. Retry button resumes scanning.
+//  - File fallback (no live camera): capture a photo and identify once.
 $("#idCaptureBtn").addEventListener("click", async () => {
+  const c = cams.id;
+  const liveScanning = idLoopActive && c && !c.usesFile;
+  if (liveScanning) { freezeIdResults(); return; }
+
   const btn = $("#idCaptureBtn");
   const canvas = await capture("id");
   if (!canvas) return;
@@ -720,15 +745,43 @@ $("#idCaptureBtn").addEventListener("click", async () => {
   try {
     const probe = await fingerprint(canvas);
     lastProbe = probe; lastCanvas = canvas;
-    // Identify against ALL keys, including decommissioned ones — a key you're
-    // holding may well be one that was previously decommissioned.
     const keys = await getAllKeys();
-    const ranked = keys.map((k) => ({ key: k, score: keyScore(probe, k) }))
+    smoothScores = {};
+    keys.forEach((k) => { smoothScores[k.id] = keyScore(probe, k); });
+    const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
       .sort((a, b) => b.score - a.score).slice(0, 3);
+    idFrozen = true;
     renderIdResults(ranked);
+    $("#idRetryBtn").hidden = false;
   } finally {
     btn.disabled = false;
+    btn.hidden = true; // file mode: hide capture until retry
     btn.innerHTML = "📸 Capture &amp; Identify";
+  }
+});
+
+// Freeze the live ranking into a calm review state (stops re-ordering).
+function freezeIdResults() {
+  idFrozen = true;
+  stopIdLoop();
+  hideScanPaused();
+  $("#idCaptureBtn").hidden = true;
+  $("#idRetryBtn").hidden = false;
+  $("#idGuideText").textContent = "Locked — tap the correct key, or scan again";
+}
+
+// Retry: clear the freeze and resume live scanning.
+$("#idRetryBtn").addEventListener("click", () => {
+  const c = cams.id;
+  $("#idRetryBtn").hidden = true;
+  if (c && !c.usesFile) {
+    startIdLoop();
+  } else {
+    // file fallback: just re-enable capture
+    idFrozen = false;
+    $("#idResults").innerHTML = "";
+    $("#idCaptureBtn").hidden = false;
+    $("#idGuideText").textContent = "Tap Capture to identify a key";
   }
 });
 
@@ -741,9 +794,14 @@ function renderIdResults(ranked) {
     html = '<h3>No keys stored yet</h3><p class="hint">Add this key so Key Buddy can recognize it next time.</p>';
   } else {
     const top = Math.round(ranked[0].score * 100);
-    guide.textContent = ranked[0].score >= 0.55
-      ? `Best match: ${isUnidentified(ranked[0].key) ? "Unidentified key" : ranked[0].key.for} (${top}%) — tap to confirm`
-      : `Best guess ${top}% — hold steady or tap a match`;
+    const topName = isUnidentified(ranked[0].key) ? "Unidentified key" : ranked[0].key.for;
+    if (idFrozen) {
+      guide.textContent = `Locked on "${topName}" (${top}%) — tap the correct key, or Scan again`;
+    } else if (ranked[0].score >= 0.55) {
+      guide.textContent = `Best: ${topName} (${top}%) — tap it, or Lock in to hold steady`;
+    } else {
+      guide.textContent = `Best guess ${top}% — hold steady, or Lock in`;
+    }
     html = "<h3>Likely matches</h3>";
     ranked.forEach((r) => {
       const pct = Math.round(r.score * 100);
