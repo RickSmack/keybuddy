@@ -115,11 +115,8 @@
   .cam-controls { display: flex; gap: 10px; margin-top: 12px; }
 
   /* find-in-pile: preview shows the whole photo (contain) so overlay boxes line up */
+  /* Find-in-Pile result: the captured photo with boxes burned in; show whole image */
   #findPreview { object-fit: contain !important; background: #000; }
-  .find-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  .find-overlay rect.match { fill: rgba(78,201,127,.18); stroke: var(--good); stroke-width: .6; }
-  .find-overlay rect.other { fill: none; stroke: rgba(255,255,255,.35); stroke-width: .3; stroke-dasharray: 1.5 1.5; }
-  .find-overlay text { fill: #fff; font-size: 3.4px; font-weight: 700; paint-order: stroke; stroke: #12321f; stroke-width: .8px; }
 
   .thumb { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; background: var(--panel-2); flex-shrink: 0; }
   .thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }

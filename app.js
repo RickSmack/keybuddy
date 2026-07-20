@@ -972,21 +972,23 @@ async function startFindInPile(id) {
   if (!findTargetKey) return;
   $("#findTitle").textContent = "Find in pile";
   $("#findTarget").innerHTML = `Looking for: <strong>${keyLabel(findTargetKey)}</strong>${findTargetKey.category ? " · " + escapeHtml(findTargetKey.category) : ""}`;
-  // reset UI
-  $("#findResults").innerHTML = "";
-  $("#findOverlay").hidden = true; $("#findOverlay").innerHTML = "";
-  $("#findPreview").hidden = true; $("#findVideo").hidden = false;
-  $("#findGuide").style.display = ""; $("#findRetryBtn").hidden = true;
-  $("#findCaptureBtn").hidden = false;
+  // reset UI (showView("find") starts the camera)
+  resetFindUI();
   showView("find");
 }
 
-on("#findRetryBtn", "click", () => {
+function resetFindUI() {
   $("#findResults").innerHTML = "";
-  $("#findOverlay").hidden = true; $("#findOverlay").innerHTML = "";
-  $("#findPreview").hidden = true; $("#findVideo").hidden = false;
-  $("#findGuide").style.display = ""; $("#findRetryBtn").hidden = true;
+  $("#findPreview").hidden = true;
+  $("#findVideo").hidden = false;
+  $("#findGuide").style.display = "";
+  $("#findRetryBtn").hidden = true;
   $("#findCaptureBtn").hidden = false;
+}
+
+on("#findRetryBtn", "click", () => {
+  resetFindUI();
+  startCamera("find"); // camera was stopped on capture — restart it for a new photo
 });
 
 on("#findCaptureBtn", "click", async () => {
@@ -996,59 +998,86 @@ on("#findCaptureBtn", "click", async () => {
   const full = await captureFull("find");
   if (!full) return;
 
-  // freeze the photo as the preview
-  const prev = $("#findPreview");
-  prev.width = full.width; prev.height = full.height;
-  prev.getContext("2d").drawImage(full, 0, 0);
-  prev.hidden = false; $("#findVideo").hidden = true; $("#findGuide").style.display = "none";
+  // Freeze: stop the camera and hide the live video so nothing moves under us.
+  stopCamera("find");
+  $("#findVideo").hidden = true;
+  $("#findGuide").style.display = "none";
   $("#findRetryBtn").hidden = false; $("#findCaptureBtn").hidden = true;
 
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Searching…';
   try {
     const seg = segmentPile(full, full.width, full.height);
-    if (!seg.blobs.length) {
-      renderFindResults([], seg);
-      return;
-    }
-    // fingerprint each blob and score against the target key
     const scored = [];
     for (const b of seg.blobs) {
       const fp = await fingerprint(cropBlob(seg.canvas, b), false);
       scored.push({ blob: b, score: keyScore(fp, findTargetKey) });
     }
-    renderFindResults(scored, seg);
+    drawFindResult(full, seg, scored);
+    renderFindSummary(scored);
   } finally {
     btn.disabled = false; btn.innerHTML = "📸 Capture &amp; find";
   }
 });
 
-function renderFindResults(scored, seg) {
-  const matches = scored.filter((s) => s.score >= FIND_MATCH_THRESH)
-    .sort((a, b) => b.score - a.score);
-  // draw overlay boxes in the preview's coordinate space (viewBox 0..100)
-  const ov = $("#findOverlay");
-  ov.setAttribute("viewBox", `0 0 ${seg.W} ${seg.H}`);
-  // "meet" letterboxes exactly like the preview's object-fit: contain, so boxes line up.
-  ov.setAttribute("preserveAspectRatio", "xMidYMid meet");
-  let svg = "";
+// Burn bounding boxes directly onto the captured photo (a static canvas), so
+// they can never drift out of alignment — there's no live video underneath.
+function drawFindResult(full, seg, scored) {
+  const prev = $("#findPreview");
+  prev.width = full.width; prev.height = full.height;
+  const ctx = prev.getContext("2d");
+  ctx.drawImage(full, 0, 0);
+  // blob coords are in the downscaled seg space; scale up to full-image pixels
+  const sx = full.width / seg.W, sy = full.height / seg.H;
+  const lw = Math.max(3, Math.round(full.width / 160)); // scale line width to image
+  ctx.lineJoin = "round";
+  ctx.font = `bold ${Math.max(14, Math.round(full.width / 26))}px sans-serif`;
+  ctx.textBaseline = "bottom";
   scored.forEach((s) => {
     const isMatch = s.score >= FIND_MATCH_THRESH;
-    svg += `<rect class="${isMatch ? "match" : "other"}" x="${s.blob.x}" y="${s.blob.y}" width="${s.blob.w}" height="${s.blob.h}" rx="3"/>`;
+    const x = s.blob.x * sx, y = s.blob.y * sy, w = s.blob.w * sx, h = s.blob.h * sy;
     if (isMatch) {
-      svg += `<text x="${s.blob.x + 1}" y="${Math.max(4, s.blob.y - 1)}">${Math.round(s.score * 100)}%</text>`;
+      // bold bright bounding box + label chip
+      ctx.lineWidth = lw + 2;
+      ctx.strokeStyle = "rgba(0,0,0,0.55)"; // dark halo for contrast on any bg
+      ctx.strokeRect(x - 1, y - 1, w + 2, h + 2);
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = "#39d353"; // vivid green
+      ctx.strokeRect(x, y, w, h);
+      const label = `${Math.round(s.score * 100)}%`;
+      const tw = ctx.measureText(label).width;
+      const th = Math.max(18, Math.round(full.width / 22));
+      const ly = Math.max(th, y);
+      ctx.fillStyle = "#39d353";
+      ctx.fillRect(x, ly - th, tw + 12, th);
+      ctx.fillStyle = "#0b2a13";
+      ctx.fillText(label, x + 6, ly - 3);
+    } else {
+      // faint dashed outline for other detected keys
+      ctx.save();
+      ctx.setLineDash([lw * 2, lw * 2]);
+      ctx.lineWidth = Math.max(1, lw - 2);
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.strokeRect(x, y, w, h);
+      ctx.restore();
     }
   });
-  ov.innerHTML = svg;
-  ov.hidden = false;
+  prev.hidden = false;
+}
 
+function renderFindSummary(scored) {
+  const matches = scored.filter((s) => s.score >= FIND_MATCH_THRESH);
   const box = $("#findResults");
+  if (!scored.length) {
+    box.innerHTML = `<div class="empty">No key-like shapes detected.<br><span style="font-size:12px">Lay the keys on a plain, contrasting surface with space between them, then capture again.</span></div>`;
+    return;
+  }
   if (!matches.length) {
-    box.innerHTML = `<div class="empty">No match found in this photo.<br><span style="font-size:12px">Detected ${scored.length} key-like shape(s). Try spreading the keys apart on a plainer surface, or take a clearer photo.</span></div>`;
+    box.innerHTML = `<div class="empty">No match found in this photo.<br><span style="font-size:12px">Detected ${scored.length} key-like shape(s) (dashed outlines). Try spreading the keys apart on a plainer surface.</span></div>`;
     return;
   }
   const word = matches.length === 1 ? "match" : "matches";
-  box.innerHTML = `<h3>${matches.length} ${word} highlighted</h3>` +
-    `<p class="hint">Green boxes mark where <strong>${keyLabel(findTargetKey)}</strong> appears${matches.length > 1 ? " (duplicates found)" : ""}. Other detected keys are outlined faintly.</p>`;
+  box.innerHTML = `<h3>${matches.length} ${word} found</h3>` +
+    `<p class="hint">Green boxes mark where <strong>${keyLabel(findTargetKey)}</strong> appears${matches.length > 1 ? " (duplicates found)" : ""}. Other detected keys have faint dashed outlines.</p>`;
 }
 
 /* ---------- custom inline date picker (commits on tap) ---------- */
