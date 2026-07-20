@@ -136,6 +136,12 @@
       <button class="btn secondary" id="exportTrainBtn">📦 Export training dataset</button>
     </div>
     <div class="card">
+      <h3 style="margin-top:0">🧹 Rebuild fingerprints</h3>
+      <p class="hint">Recompute every key's fingerprints from its saved photos. This <strong>purges stray fingerprints added by the old auto-confirm behavior</strong> (they have no photo, so they're dropped) and refreshes the rest with the current recognition pipeline. Your photos, labels, and all other details are kept.</p>
+      <button class="btn secondary" id="rebuildBtn">🧹 Rebuild all fingerprints</button>
+      <p class="hint" id="rebuildStatus" style="margin-top:8px"></p>
+    </div>
+    <div class="card">
       <h3 style="margin-top:0">🔒 Data privacy</h3>
       <p class="hint">Your keys are private and stay on your device. Every photo, fingerprint, label, and category is stored only in this browser's local storage on <em>this</em> phone — never uploaded to any server, and Key Buddy has no account or cloud. Your data leaves this device only through an export file that <em>you</em> choose to share (see Sync above). All code and recognition assets are served from Key Buddy's own site — there are no third-party requests.</p>
       <p class="hint" style="margin-bottom:14px">Use the button below to permanently erase every key and fingerprint from this device. This cannot be undone.</p>

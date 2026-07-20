@@ -1390,6 +1390,56 @@ async function renderStats() {
   $("#statsLine").textContent = `${all.length} key(s) on this device · ${active} active · ${all.length - active} decommissioned`;
 }
 
+// Load a stored thumbnail (data URL) into a CAP-square work canvas for re-fingerprinting.
+function dataUrlToWorkCanvas(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(toWorkCanvas(img, img.naturalWidth, img.naturalHeight));
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+// Rebuild every key's fingerprints FROM its stored photos. Confirmation-added
+// fingerprints have no matching photo, so they simply vanish; enrollment photos
+// are re-fingerprinted with the current pipeline.
+$("#rebuildBtn").addEventListener("click", async () => {
+  const all = await getAllKeys();
+  if (!all.length) { toast("No keys to rebuild."); return; }
+  if (!confirm("Rebuild fingerprints for all keys from their photos? This removes stray confirmation images and cannot be undone.")) return;
+  const btn = $("#rebuildBtn");
+  btn.disabled = true;
+  const status = $("#rebuildStatus");
+  // Wait (briefly) for OpenCV so rebuilt fingerprints get consistent background masking.
+  ensureOpenCV();
+  if (!cvReady) {
+    status.textContent = "Preparing image tools…";
+    for (let i = 0; i < 60 && !cvReady; i++) await new Promise((r) => setTimeout(r, 250));
+  }
+  let done = 0, removed = 0, keysTouched = 0;
+  for (const key of all) {
+    const thumbs = key.thumbnails || [];
+    const before = (key.fingerprints || []).length;
+    const rebuilt = [];
+    for (const t of thumbs) {
+      const canvas = await dataUrlToWorkCanvas(t);
+      if (!canvas) continue;
+      const fp = await fingerprint(canvas);
+      rebuilt.push(fp);
+    }
+    removed += Math.max(0, before - rebuilt.length);
+    if (before !== rebuilt.length) keysTouched++;
+    key.fingerprints = rebuilt;
+    key.updatedAt = new Date().toISOString();
+    await putKey(key);
+    done++;
+    status.textContent = `Rebuilding… ${done}/${all.length} keys`;
+  }
+  status.textContent = `Done — ${done} keys rebuilt, ${removed} stray fingerprint(s) removed.`;
+  toast(`✓ Rebuilt ${done} keys · removed ${removed} stray`);
+  btn.disabled = false;
+});
+
 /* ---------- util ---------- */
 const isUnidentified = (k) => !k.for || !String(k.for).trim();
 // Human label for a key, escaped for HTML. Unidentified keys get a placeholder.
