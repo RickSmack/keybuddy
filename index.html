@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#1f2933" />
 <title>Key Buddy</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2214%22%20fill%3D%22%231b2430%22%2F%3E%3Ccircle%20cx%3D%2224%22%20cy%3D%2224%22%20r%3D%2210%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%2F%3E%3Ccircle%20cx%3D%2224%22%20cy%3D%2224%22%20r%3D%223%22%20fill%3D%22%231b2430%22%2F%3E%3Cpath%20d%3D%22M31%2031%20L50%2050%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%20stroke-linecap%3D%22round%22%2F%3E%3Cpath%20d%3D%22M50%2050%20L50%2043%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%20stroke-linecap%3D%22round%22%2F%3E%3Cpath%20d%3D%22M43%2043%20L43%2037%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2214%22%20fill%3D%22%231b2430%22%2F%3E%3Ccircle%20cx%3D%2224%22%20cy%3D%2224%22%20r%3D%2210%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%2F%3E%3Ccircle%20cx%3D%2224%22%20cy%3D%2224%22%20r%3D%223%22%20fill%3D%22%231b2430%22%2F%3E%3Cpath%20d%3D%22M31%2031%20L50%2050%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%20stroke-linecap%3D%22round%22%2F%3E%3Cpath%20d%3D%22M50%2050%20L50%2043%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%20stroke-linecap%3D%22round%22%2F%3E%3Cpath%20d%3D%22M43%2043%20L43%2037%22%20fill%3D%22none%22%20stroke%3D%22%23f5b942%22%20stroke-width%3D%225%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E" />
 <style>
   :root {
     --bg: #0f1720;
@@ -134,9 +136,25 @@
   .toast { position: fixed; bottom: 96px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 11px 18px; border-radius: 24px; font-size: 14px; z-index: 50; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90%; }
   .toast.show { opacity: 1; }
 
-  .filter-chips { display: flex; gap: 8px; margin-bottom: 12px; }
+  .filter-chips { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   .chip { background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); padding: 6px 14px; border-radius: 20px; font-size: 13px; cursor: pointer; }
   .chip.active { background: var(--accent); color: #201a08; border-color: var(--accent); }
+  .chip .count { opacity: .65; font-size: 11px; margin-left: 4px; }
+
+  /* custom inline date picker (commits on tap, no native "Set" button) */
+  .datepick { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-top: 5px; }
+  .datepick .dp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .datepick .dp-head button { background: none; border: none; color: var(--accent); font-size: 20px; cursor: pointer; padding: 2px 10px; }
+  .datepick .dp-head .dp-title { font-size: 14px; font-weight: 600; }
+  .datepick .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+  .datepick .dp-dow { font-size: 10px; color: var(--muted); text-align: center; padding: 2px 0; }
+  .datepick .dp-day { text-align: center; padding: 7px 0; font-size: 13px; border-radius: 8px; cursor: pointer; color: var(--text); }
+  .datepick .dp-day.empty { visibility: hidden; }
+  .datepick .dp-day.today { outline: 1px solid var(--border); }
+  .datepick .dp-day.sel { background: var(--accent); color: #201a08; font-weight: 600; }
+  .datepick .dp-day:active { background: var(--panel); }
+  .dp-value { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 13px; }
+  .dp-value .clear { color: var(--bad); cursor: pointer; background: none; border: none; font-size: 12px; }
 
   .spinner { width: 18px; height: 18px; border: 2px solid rgba(0,0,0,.25); border-top-color: #201a08; border-radius: 50%; animation: spin .7s linear infinite; }
   .spinner.light { border-color: rgba(255,255,255,.25); border-top-color: #fff; }
@@ -168,11 +186,11 @@
         <svg viewBox="0 0 300 400" preserveAspectRatio="none">
           <rect x="60" y="70" width="180" height="260" rx="20" fill="none" stroke="rgba(245,185,66,.7)" stroke-width="2" stroke-dasharray="8 6"/>
         </svg>
-        <div class="guide-text">Lay the key flat on a plain surface, fill the box</div>
+        <div class="guide-text" id="idGuideText">Point at a key — matching automatically…</div>
       </div>
     </div>
     <div class="cam-controls">
-      <button class="btn" id="idCaptureBtn">📸 Capture &amp; Identify</button>
+      <button class="btn" id="idCaptureBtn" hidden>📸 Capture &amp; Identify</button>
       <button class="btn secondary" id="idRetryBtn" hidden>↻ Retry</button>
     </div>
     <input type="file" accept="image/*" capture="environment" id="idFileInput" hidden />
@@ -204,13 +222,19 @@
       <label class="field">What is this key for?
         <input type="text" id="addFor" placeholder="e.g. Barn side door" />
       </label>
+      <label class="field">Category (optional)
+        <input type="text" id="addCategory" list="categoryList" placeholder="e.g. Bert's Keys" />
+        <datalist id="categoryList"></datalist>
+      </label>
       <label class="field">Date (optional)
-        <input type="date" id="addDate" />
+        <div class="datepick" id="addDatePick"></div>
+        <div class="dp-value" id="addDateValue"></div>
+        <input type="hidden" id="addDate" />
       </label>
       <label class="field">Status
         <select id="addStatus">
           <option value="active">Active</option>
-          <option value="obsolete">Obsolete</option>
+          <option value="obsolete">Decommissioned</option>
         </select>
       </label>
       <label class="field">Notes (optional)
@@ -224,11 +248,7 @@
   <!-- MY KEYS -->
   <section class="view" id="view-keys">
     <h2>My keys</h2>
-    <div class="filter-chips">
-      <div class="chip active" data-filter="active">Active</div>
-      <div class="chip" data-filter="obsolete">Obsolete</div>
-      <div class="chip" data-filter="all">All</div>
-    </div>
+    <div class="filter-chips" id="keysFilters"></div>
     <div class="card" id="keysList"></div>
   </section>
 
@@ -525,7 +545,12 @@ async function startCamera(view) {
     // Fallback to file capture (e.g. no permission / insecure context)
     cams[view].usesFile = true;
     video.hidden = true;
-    if (view === "id") $("#idFallbackHint").hidden = false;
+    if (view === "id") {
+      // no live preview → expose the manual capture button + hint
+      $("#idFallbackHint").hidden = false;
+      $("#idCaptureBtn").hidden = false;
+      $("#idGuideText").textContent = "Tap Capture to take a photo";
+    }
   }
 }
 function stopCamera(view) {
@@ -564,103 +589,212 @@ function showView(name) {
     const viewOfCam = v === "id" ? "identify" : "add";
     if (viewOfCam === name) startCamera(v); else stopCamera(v);
   });
+  // auto-identify loop only runs on the Identify view
+  if (name === "identify") startIdLoop(); else stopIdLoop();
+  if (name === "add") { renderDatePicker(); refreshCategoryList(); }
   if (name === "keys") renderKeys();
   if (name === "sync") renderStats();
 }
 $$("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
 
-/* ---------- IDENTIFY flow ---------- */
+/* ---------- IDENTIFY flow (continuous auto-identify) ---------- */
+let idLoopActive = false;   // loop should keep running
+let idBusy = false;         // an inference is in flight
+let lastProbe = null, lastCanvas = null;
+const ID_INTERVAL = 1200;   // ms between inference attempts
+
+function startIdLoop() {
+  if (idLoopActive) return;
+  idLoopActive = true;
+  scheduleIdTick(300);
+}
+function stopIdLoop() { idLoopActive = false; }
+function scheduleIdTick(delay) {
+  if (!idLoopActive) return;
+  setTimeout(idTick, delay);
+}
+async function idTick() {
+  if (!idLoopActive) return;
+  const c = cams.id;
+  // Only auto-scan with a live camera; file fallback uses the manual button.
+  if (!c || c.usesFile || !c.stream || !c.video.videoWidth || idBusy || modelState === "loading") {
+    scheduleIdTick(ID_INTERVAL);
+    return;
+  }
+  idBusy = true;
+  try {
+    const canvas = toWorkCanvas(c.video, c.video.videoWidth, c.video.videoHeight);
+    const probe = await fingerprint(canvas);
+    lastProbe = probe; lastCanvas = canvas;
+    const keys = (await getAllKeys()).filter((k) => k.status !== "obsolete");
+    const ranked = keys.map((k) => ({ key: k, score: keyScore(probe, k) }))
+      .sort((a, b) => b.score - a.score).slice(0, 3);
+    renderIdResults(ranked);
+  } catch (e) {
+    /* transient frame error — just try again next tick */
+  } finally {
+    idBusy = false;
+    scheduleIdTick(ID_INTERVAL);
+  }
+}
+
+// Manual button: used only in the no-camera file-fallback path.
 $("#idCaptureBtn").addEventListener("click", async () => {
   const btn = $("#idCaptureBtn");
   const canvas = await capture("id");
   if (!canvas) return;
-  // show frozen preview
-  const prev = $("#idPreview");
-  prev.width = CAP; prev.height = CAP;
-  prev.getContext("2d").drawImage(canvas, 0, 0);
-  prev.hidden = false; $("#idVideo").hidden = true; $("#idOverlay").style.display = "none";
-  $("#idRetryBtn").hidden = false;
-
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Analyzing…';
   try {
     const probe = await fingerprint(canvas);
+    lastProbe = probe; lastCanvas = canvas;
     const keys = (await getAllKeys()).filter((k) => k.status !== "obsolete");
     const ranked = keys.map((k) => ({ key: k, score: keyScore(probe, k) }))
       .sort((a, b) => b.score - a.score).slice(0, 3);
-    renderIdResults(ranked, probe, canvas);
+    renderIdResults(ranked);
   } finally {
     btn.disabled = false;
     btn.innerHTML = "📸 Capture &amp; Identify";
   }
 });
-$("#idRetryBtn").addEventListener("click", () => {
-  $("#idPreview").hidden = true; $("#idVideo").hidden = false;
-  $("#idOverlay").style.display = ""; $("#idRetryBtn").hidden = true;
-  $("#idResults").innerHTML = "";
-});
 
-function renderIdResults(ranked, probe, canvas) {
+function renderIdResults(ranked) {
   const box = $("#idResults");
-  const strong = ranked[0] && ranked[0].score >= 0.55;
-  let html = "<h3>" + (ranked.length ? "Likely matches" : "No keys stored yet") + "</h3>";
+  const guide = $("#idGuideText");
+  let html = "";
   if (!ranked.length) {
-    html += '<p class="hint">Add this key so Key Buddy can recognize it next time.</p>';
+    guide.textContent = "No keys stored yet — add one below";
+    html = '<h3>No keys stored yet</h3><p class="hint">Add this key so Key Buddy can recognize it next time.</p>';
+  } else {
+    const top = Math.round(ranked[0].score * 100);
+    guide.textContent = ranked[0].score >= 0.55
+      ? `Best match: ${ranked[0].key.for} (${top}%) — tap to confirm`
+      : `Best guess ${top}% — hold steady or tap a match`;
+    html = "<h3>Likely matches</h3>";
+    ranked.forEach((r) => {
+      const pct = Math.round(r.score * 100);
+      const thumb = r.key.thumbnails?.[0] || "";
+      html += `<div class="candidate" data-id="${r.key.id}">
+        <img class="thumb" src="${thumb}" alt="" />
+        <div style="flex:1">
+          <div class="meta"><span class="name">${escapeHtml(r.key.for)}</span></div>
+          <div class="score-bar"><div style="width:${pct}%"></div></div>
+          <div class="sub" style="font-size:12px;color:var(--muted);margin-top:4px">${pct}% match${r.key.category ? " · " + escapeHtml(r.key.category) : ""}${r.key.date ? " · " + r.key.date : ""}</div>
+        </div>
+      </div>`;
+    });
   }
-  ranked.forEach((r) => {
-    const pct = Math.round(r.score * 100);
-    const thumb = r.key.thumbnails?.[0] || "";
-    html += `<div class="candidate" data-id="${r.key.id}">
-      <img class="thumb" src="${thumb}" alt="" />
-      <div style="flex:1">
-        <div class="meta"><span class="name">${escapeHtml(r.key.for)}</span></div>
-        <div class="score-bar"><div style="width:${pct}%"></div></div>
-        <div class="sub" style="font-size:12px;color:var(--muted);margin-top:4px">${pct}% match${r.key.date ? " · " + r.key.date : ""}</div>
-      </div>
-    </div>`;
-  });
   html += `<button class="btn secondary" id="idAddNew" style="margin-top:6px">➕ None of these — add as new key</button>`;
   box.innerHTML = html;
 
-  // pending add payload (photo + fingerprint) for "add new"
-  pendingCapture = { canvas, probe };
-
   $$("#idResults .candidate").forEach((el) => {
-    el.addEventListener("click", () => confirmMatch(el.dataset.id, probe, canvas));
+    el.addEventListener("click", () => confirmMatch(el.dataset.id));
   });
   $("#idAddNew").addEventListener("click", () => beginAddFromCapture());
-  if (!strong && ranked.length) toast("Low confidence — please confirm the match.");
 }
 
 let pendingCapture = null;
 const matchDlg = $("#matchDialog");
-async function confirmMatch(id, probe, canvas) {
+async function confirmMatch(id) {
   const key = await getKey(id);
   if (!key) return;
+  const probe = lastProbe;
+  stopIdLoop(); // pause auto-scan while the dialog is open
   $("#matchDlgTitle").textContent = "Is this the key?";
-  $("#matchDlgBody").innerHTML = `<strong>${escapeHtml(key.for)}</strong>${key.notes ? "<br>" + escapeHtml(key.notes) : ""}`;
+  $("#matchDlgBody").innerHTML = `<strong>${escapeHtml(key.for)}</strong>${key.category ? " · " + escapeHtml(key.category) : ""}${key.notes ? "<br>" + escapeHtml(key.notes) : ""}`;
   matchDlg.showModal();
   $("#matchDlgYes").onclick = async () => {
     matchDlg.close();
     // strengthen the key by storing this new fingerprint (cap at 5)
-    key.fingerprints = key.fingerprints || [];
-    if (key.fingerprints.length < 5) {
-      key.fingerprints.push(probe);
-      await putKey(key);
+    if (probe) {
+      key.fingerprints = key.fingerprints || [];
+      if (key.fingerprints.length < 5) {
+        key.fingerprints.push(probe);
+        await putKey(key);
+      }
     }
     toast("✓ " + key.for);
+    if ($("#view-identify").classList.contains("active")) startIdLoop();
   };
-  $("#matchDlgNo").onclick = () => { matchDlg.close(); };
+  $("#matchDlgNo").onclick = () => {
+    matchDlg.close();
+    if ($("#view-identify").classList.contains("active")) startIdLoop();
+  };
 }
 
 function beginAddFromCapture() {
+  // carry the most recent live frame into the Add view
+  if (lastCanvas && lastProbe) {
+    pendingCapture = { canvas: lastCanvas, probe: lastProbe };
+  }
   showView("add");
-  // seed the add view with the captured photo
   if (pendingCapture) {
     stagedPhotos = [{ canvas: pendingCapture.canvas, thumb: canvasToThumb(pendingCapture.canvas), fp: pendingCapture.probe }];
     renderStagedThumbs();
     toast("Photo carried over — just add a label.");
   }
+}
+
+/* ---------- custom inline date picker (commits on tap) ---------- */
+const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+let dpYear, dpMonth; // currently displayed month
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+// Parse "YYYY-MM-DD" into parts without timezone drift.
+function parseISO(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || "");
+  return m ? { y: +m[1], mo: +m[2] - 1, d: +m[3] } : null;
+}
+function setDate(iso) {
+  $("#addDate").value = iso || "";
+  const val = $("#addDateValue");
+  if (iso) {
+    const p = parseISO(iso);
+    val.innerHTML = `<span>${MONTHS[p.mo]} ${p.d}, ${p.y}</span><button type="button" class="clear" id="dpClear">clear</button>`;
+    $("#dpClear").onclick = () => { setDate(""); renderDatePicker(); };
+    dpYear = p.y; dpMonth = p.mo;
+  } else {
+    val.innerHTML = `<span style="color:var(--muted)">No date set</span>`;
+  }
+  renderDatePicker();
+}
+function renderDatePicker() {
+  const host = $("#addDatePick");
+  if (!host) return;
+  if (dpYear == null) {
+    const p = parseISO($("#addDate").value);
+    const now = new Date();
+    dpYear = p ? p.y : now.getFullYear();
+    dpMonth = p ? p.mo : now.getMonth();
+  }
+  const sel = parseISO($("#addDate").value);
+  const first = new Date(Date.UTC(dpYear, dpMonth, 1)).getUTCDay();
+  const days = new Date(Date.UTC(dpYear, dpMonth + 1, 0)).getUTCDate();
+  let cells = "";
+  for (let i = 0; i < first; i++) cells += `<div class="dp-day empty"></div>`;
+  for (let d = 1; d <= days; d++) {
+    const isSel = sel && sel.y === dpYear && sel.mo === dpMonth && sel.d === d;
+    cells += `<div class="dp-day${isSel ? " sel" : ""}" data-d="${d}">${d}</div>`;
+  }
+  host.innerHTML = `
+    <div class="dp-head">
+      <button type="button" id="dpPrev">‹</button>
+      <span class="dp-title">${MONTHS[dpMonth]} ${dpYear}</span>
+      <button type="button" id="dpNext">›</button>
+    </div>
+    <div class="dp-grid">${DOW.map((d) => `<div class="dp-dow">${d}</div>`).join("")}${cells}</div>`;
+  $("#dpPrev").onclick = () => { dpMonth--; if (dpMonth < 0) { dpMonth = 11; dpYear--; } renderDatePicker(); };
+  $("#dpNext").onclick = () => { dpMonth++; if (dpMonth > 11) { dpMonth = 0; dpYear++; } renderDatePicker(); };
+  $$("#addDatePick .dp-day[data-d]").forEach((el) =>
+    el.addEventListener("click", () => setDate(`${dpYear}-${pad2(dpMonth + 1)}-${pad2(+el.dataset.d)}`)));
+}
+
+/* ---------- category autocomplete ---------- */
+async function refreshCategoryList() {
+  const all = await getAllKeys();
+  const cats = distinctCategories(all);
+  $("#categoryList").innerHTML = cats.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("");
 }
 
 /* ---------- ADD / EDIT flow ---------- */
@@ -703,6 +837,7 @@ $("#addSaveBtn").addEventListener("click", async () => {
     key = { id: uid(), createdAt: new Date().toISOString(), fingerprints: [], thumbnails: [] };
   }
   key.for = forVal;
+  key.category = $("#addCategory").value.trim() || null;
   key.date = $("#addDate").value || null;
   key.status = $("#addStatus").value;
   key.notes = $("#addNotes").value.trim() || null;
@@ -727,7 +862,8 @@ function resetAddForm() {
   editingId = null;
   stagedPhotos = [];
   pendingCapture = null;
-  $("#addFor").value = ""; $("#addDate").value = ""; $("#addNotes").value = "";
+  $("#addFor").value = ""; $("#addCategory").value = ""; $("#addNotes").value = "";
+  setDate("");
   $("#addStatus").value = "active";
   $("#addTitle").textContent = "Add a key";
   $("#addCancelBtn").hidden = true;
@@ -741,10 +877,12 @@ async function editKey(id) {
   stagedPhotos = [];
   $("#addTitle").textContent = "Edit key";
   $("#addFor").value = key.for || "";
-  $("#addDate").value = key.date || "";
+  $("#addCategory").value = key.category || "";
+  setDate(key.date || "");
   $("#addStatus").value = key.status || "active";
   $("#addNotes").value = key.notes || "";
   $("#addCancelBtn").hidden = false;
+  await refreshCategoryList();
   renderStagedThumbs();
   // show existing thumbs (read-only reference)
   const box = $("#addThumbs");
@@ -755,21 +893,50 @@ async function editKey(id) {
 }
 
 /* ---------- MY KEYS ---------- */
+// Filter is one of: "active", "obsolete" (Decommissioned), "all", or "cat:<name>".
 let keysFilter = "active";
-$$(".filter-chips .chip").forEach((c) =>
-  c.addEventListener("click", () => {
-    $$(".filter-chips .chip").forEach((x) => x.classList.remove("active"));
-    c.classList.add("active"); keysFilter = c.dataset.filter; renderKeys();
-  }));
+
+// Collect distinct, non-empty categories from stored keys.
+function distinctCategories(keys) {
+  const set = new Set();
+  keys.forEach((k) => { if (k.category) set.add(k.category); });
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+async function renderFilterChips(all) {
+  const cats = distinctCategories(all);
+  const count = (fn) => all.filter(fn).length;
+  const chips = [
+    { f: "active", label: "Active", n: count((k) => (k.status || "active") === "active") },
+    ...cats.map((c) => ({ f: "cat:" + c, label: c, n: count((k) => k.category === c) })),
+    { f: "obsolete", label: "Decommissioned", n: count((k) => k.status === "obsolete") },
+    { f: "all", label: "All", n: all.length },
+  ];
+  const box = $("#keysFilters");
+  box.innerHTML = chips.map((c) =>
+    `<div class="chip ${keysFilter === c.f ? "active" : ""}" data-filter="${escapeHtml(c.f)}">${escapeHtml(c.label)}<span class="count">${c.n}</span></div>`
+  ).join("");
+  $$("#keysFilters .chip").forEach((el) =>
+    el.addEventListener("click", () => { keysFilter = el.dataset.filter; renderKeys(); }));
+}
+
+function matchesFilter(k) {
+  if (keysFilter === "all") return true;
+  if (keysFilter === "active") return (k.status || "active") === "active";
+  if (keysFilter === "obsolete") return k.status === "obsolete";
+  if (keysFilter.startsWith("cat:")) return k.category === keysFilter.slice(4);
+  return true;
+}
 
 async function renderKeys() {
   const all = await getAllKeys();
+  await renderFilterChips(all);
   const list = all
-    .filter((k) => keysFilter === "all" ? true : (k.status || "active") === keysFilter)
+    .filter(matchesFilter)
     .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   const box = $("#keysList");
   if (!list.length) {
-    box.innerHTML = '<div class="empty">No ' + (keysFilter === "all" ? "" : keysFilter + " ") + 'keys yet.</div>';
+    box.innerHTML = '<div class="empty">No keys here yet.</div>';
     return;
   }
   box.innerHTML = list.map((k) => `
@@ -777,9 +944,9 @@ async function renderKeys() {
       <img class="thumb" src="${k.thumbnails?.[0] || ""}" alt="" />
       <div class="meta">
         <div class="name">${escapeHtml(k.for)}</div>
-        <div class="sub">${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
+        <div class="sub">${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
       </div>
-      <span class="badge ${k.status || "active"}">${k.status || "active"}</span>
+      <span class="badge ${k.status || "active"}">${k.status === "obsolete" ? "decommissioned" : (k.status || "active")}</span>
     </div>
     <div class="row" style="padding:0 12px 12px" data-id="${k.id}">
       <button class="btn secondary edit-btn">Edit</button>
@@ -863,7 +1030,7 @@ $("#resetBtn").addEventListener("click", async () => {
 async function renderStats() {
   const all = await getAllKeys();
   const active = all.filter((k) => (k.status || "active") === "active").length;
-  $("#statsLine").textContent = `${all.length} key(s) on this device · ${active} active · ${all.length - active} obsolete`;
+  $("#statsLine").textContent = `${all.length} key(s) on this device · ${active} active · ${all.length - active} decommissioned`;
 }
 
 /* ---------- util ---------- */
@@ -880,6 +1047,7 @@ if ("serviceWorker" in navigator) {
 }
 
 /* ---------- boot ---------- */
+setDate("");            // initialize the date picker to "no date"
 showView("identify");
 loadModel();
 </script>
