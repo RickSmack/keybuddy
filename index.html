@@ -99,6 +99,17 @@
     background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
     border-radius: 10px; padding: 11px 12px; font-size: 15px;
   }
+  label.field input[type="range"] { padding: 0; }
+
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; font-size: 15px; color: var(--text); }
+  .toggle-row input[type="checkbox"] { width: 46px; height: 28px; -webkit-appearance: none; appearance: none; background: var(--panel-2); border: 1px solid var(--border); border-radius: 16px; position: relative; cursor: pointer; transition: background .15s; }
+  .toggle-row input[type="checkbox"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s; }
+  .toggle-row input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+  .toggle-row input[type="checkbox"]:checked::after { transform: translateX(18px); background: #201a08; }
+  .range-val { display: flex; align-items: center; gap: 12px; }
+  .range-val input[type="range"] { flex: 1; }
+  .range-val b { min-width: 46px; text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
+  #autoScanOpts.disabled { opacity: .45; pointer-events: none; }
 
   /* camera */
   .camera-wrap { position: relative; border-radius: var(--radius); overflow: hidden; background: #000; aspect-ratio: 3/4; }
@@ -177,7 +188,7 @@
 
 <main>
   <!-- IDENTIFY -->
-  <section class="view active" id="view-identify">
+  <section class="view" id="view-identify">
     <h2>Identify a key</h2>
     <div class="camera-wrap" id="idCameraWrap">
       <video id="idVideo" playsinline muted autoplay></video>
@@ -220,8 +231,8 @@
     <div class="thumbs" id="addThumbs"></div>
 
     <div class="card">
-      <label class="field">What is this key for?
-        <input type="text" id="addFor" placeholder="e.g. Barn side door" />
+      <label class="field">What is this key for? <span style="opacity:.7">(leave blank if unknown)</span>
+        <input type="text" id="addFor" placeholder="e.g. Barn side door — or leave blank to investigate later" />
       </label>
       <label class="field">Category (optional)
         <input type="text" id="addCategory" list="categoryList" placeholder="e.g. Bert's Keys" />
@@ -247,7 +258,7 @@
   </section>
 
   <!-- MY KEYS -->
-  <section class="view" id="view-keys">
+  <section class="view active" id="view-keys">
     <h2>My keys</h2>
     <div class="filter-chips" id="keysFilters"></div>
     <div class="card" id="keysList"></div>
@@ -274,13 +285,47 @@
     </div>
     <p class="hint" style="text-align:center" id="statsLine"></p>
   </section>
+
+  <!-- SETTINGS -->
+  <section class="view" id="view-settings">
+    <h2>Settings</h2>
+    <div class="card">
+      <h3 style="margin-top:0">Auto-scan (Identify)</h3>
+      <p class="hint">When on, the Identify screen watches the live camera and matches keys continuously — no button press. When off, you tap a button to capture.</p>
+      <label class="toggle-row">
+        <span>Enable auto-scan</span>
+        <input type="checkbox" id="setAutoScan" />
+      </label>
+
+      <div id="autoScanOpts">
+        <label class="field" style="margin-top:14px">Auto-pause when…
+          <select id="setPauseMode">
+            <option value="both">No motion, or time limit (whichever first)</option>
+            <option value="activity">No motion for a while</option>
+            <option value="time">A fixed time passes</option>
+            <option value="never">Never (scan until I leave the screen)</option>
+          </select>
+        </label>
+
+        <label class="field" id="setMotionRow">Pause after no motion for
+          <span class="range-val"><input type="range" id="setMotionSecs" min="3" max="60" step="1" /><b id="setMotionSecsVal"></b></span>
+        </label>
+
+        <label class="field" id="setTimeRow">Pause after a total of
+          <span class="range-val"><input type="range" id="setTimeSecs" min="10" max="180" step="5" /><b id="setTimeSecsVal"></b></span>
+        </label>
+      </div>
+      <p class="hint">Auto-scan uses more battery than tap-to-capture; pausing conserves it. Resume anytime by tapping the camera or the Resume button.</p>
+    </div>
+  </section>
 </main>
 
 <nav>
-  <button class="active" data-view="identify"><span class="ico">🔍</span>Identify</button>
+  <button data-view="identify"><span class="ico">🔍</span>Identify</button>
   <button data-view="add"><span class="ico">➕</span>Add</button>
-  <button data-view="keys"><span class="ico">🗝️</span>My Keys</button>
+  <button class="active" data-view="keys"><span class="ico">🗝️</span>My Keys</button>
   <button data-view="sync"><span class="ico">🔄</span>Sync</button>
+  <button data-view="settings"><span class="ico">⚙️</span>Settings</button>
 </nav>
 
 <div class="toast" id="toast"></div>
@@ -547,7 +592,9 @@ async function startCamera(view) {
     cams[view].usesFile = true;
     video.hidden = true;
     if (view === "id") {
-      // no live preview → expose the manual capture button + hint
+      // no live preview → force manual capture regardless of auto-scan setting
+      stopIdLoop();
+      $("#idResumeBtn").hidden = true;
       $("#idFallbackHint").hidden = false;
       $("#idCaptureBtn").hidden = false;
       $("#idGuideText").textContent = "Tap Capture to take a photo";
@@ -581,6 +628,43 @@ function capture(view) {
   });
 }
 
+/* ---------- settings (persisted in localStorage) ---------- */
+const SETTINGS_KEY = "keybuddy.settings";
+const DEFAULT_SETTINGS = {
+  autoScan: true,
+  pauseMode: "both",   // "both" | "activity" | "time" | "never"
+  motionSecs: 10,      // pause after this many seconds with no motion
+  timeSecs: 25,        // pause after this many total seconds
+};
+let settings = loadSettings();
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS };
+  } catch (_) { return { ...DEFAULT_SETTINGS }; }
+}
+function saveSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (_) {}
+}
+
+function renderSettings() {
+  $("#setAutoScan").checked = settings.autoScan;
+  $("#setPauseMode").value = settings.pauseMode;
+  $("#setMotionSecs").value = settings.motionSecs;
+  $("#setMotionSecsVal").textContent = settings.motionSecs + "s";
+  $("#setTimeSecs").value = settings.timeSecs;
+  $("#setTimeSecsVal").textContent = settings.timeSecs + "s";
+  // enable/disable dependent controls
+  $("#autoScanOpts").classList.toggle("disabled", !settings.autoScan);
+  const mode = settings.pauseMode;
+  $("#setMotionRow").style.display = (mode === "activity" || mode === "both") ? "" : "none";
+  $("#setTimeRow").style.display = (mode === "time" || mode === "both") ? "" : "none";
+}
+$("#setAutoScan").addEventListener("change", (e) => { settings.autoScan = e.target.checked; saveSettings(); renderSettings(); });
+$("#setPauseMode").addEventListener("change", (e) => { settings.pauseMode = e.target.value; saveSettings(); renderSettings(); });
+$("#setMotionSecs").addEventListener("input", (e) => { settings.motionSecs = +e.target.value; $("#setMotionSecsVal").textContent = settings.motionSecs + "s"; saveSettings(); });
+$("#setTimeSecs").addEventListener("input", (e) => { settings.timeSecs = +e.target.value; $("#setTimeSecsVal").textContent = settings.timeSecs + "s"; saveSettings(); });
+
 /* ---------- navigation ---------- */
 function showView(name) {
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + name));
@@ -590,11 +674,12 @@ function showView(name) {
     const viewOfCam = v === "id" ? "identify" : "add";
     if (viewOfCam === name) startCamera(v); else stopCamera(v);
   });
-  // auto-identify loop only runs on the Identify view
-  if (name === "identify") startIdLoop(); else stopIdLoop();
+  // auto-identify loop only runs on the Identify view (and only if enabled)
+  if (name === "identify") enterIdentify(); else stopIdLoop();
   if (name === "add") { renderDatePicker(); refreshCategoryList(); }
   if (name === "keys") renderKeys();
   if (name === "sync") renderStats();
+  if (name === "settings") renderSettings();
 }
 $$("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
 
@@ -603,27 +688,50 @@ let idLoopActive = false;   // loop should keep running
 let idBusy = false;         // an inference is in flight
 let lastProbe = null, lastCanvas = null;
 let scanStartedAt = 0;      // when the current scanning run began
+let lastMotionAt = 0;       // last time motion was detected
+let motionPrev = null;      // previous downscaled frame for motion diff
 const ID_INTERVAL = 1200;   // ms between inference attempts
-const SCAN_MAX_MS = 25000;  // auto-pause after this long to save battery
+const MOTION_THRESH = 8;    // mean per-pixel gray delta counted as "motion"
+
+// Called when entering the Identify view: start auto-scan if enabled,
+// otherwise fall back to the manual capture button.
+function enterIdentify() {
+  const c = cams.id;
+  if (settings.autoScan && !(c && c.usesFile)) {
+    $("#idCaptureBtn").hidden = true;
+    startIdLoop();
+  } else {
+    stopIdLoop();
+    $("#idResumeBtn").hidden = true;
+    $("#idCaptureBtn").hidden = false;
+    $("#idGuideText").textContent = "Tap Capture to identify a key";
+  }
+}
 
 function startIdLoop() {
   if (idLoopActive) return;
   idLoopActive = true;
-  scanStartedAt = performance.now();
+  const now = performance.now();
+  scanStartedAt = now;
+  lastMotionAt = now;
+  motionPrev = null;
   hideScanPaused();
+  $("#idGuideText").textContent = "Point at a key — matching automatically…";
   scheduleIdTick(300);
 }
 function stopIdLoop() { idLoopActive = false; }
-function pauseIdLoop() {
+function pauseIdLoop(reason) {
   idLoopActive = false;
-  showScanPaused();
+  showScanPaused(reason);
 }
 function scheduleIdTick(delay) {
   if (!idLoopActive) return;
   setTimeout(idTick, delay);
 }
-function showScanPaused() {
-  $("#idGuideText").textContent = "Scanning paused to save battery";
+function showScanPaused(reason) {
+  $("#idGuideText").textContent = reason === "motion"
+    ? "Paused (no motion) — tap to resume"
+    : "Scanning paused to save battery";
   const btn = $("#idResumeBtn");
   if (btn) btn.hidden = false;
 }
@@ -631,16 +739,53 @@ function hideScanPaused() {
   const btn = $("#idResumeBtn");
   if (btn) btn.hidden = true;
 }
+
+// Cheap frame-to-frame motion: mean absolute gray delta on a 32x32 downscale.
+function detectMotion(video) {
+  const S = 32;
+  const c = document.createElement("canvas"); c.width = S; c.height = S;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(video, 0, 0, S, S);
+  const d = ctx.getImageData(0, 0, S, S).data;
+  const cur = new Uint8Array(S * S);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) cur[p] = (d[i] * .299 + d[i+1] * .587 + d[i+2] * .114) | 0;
+  let moved = false;
+  if (motionPrev) {
+    let sum = 0;
+    for (let p = 0; p < cur.length; p++) sum += Math.abs(cur[p] - motionPrev[p]);
+    if (sum / cur.length > MOTION_THRESH) moved = true;
+  }
+  motionPrev = cur;
+  return moved;
+}
+
+// Decide whether to auto-pause based on the user's settings.
+function shouldPause() {
+  const now = performance.now();
+  const mode = settings.pauseMode;
+  const timeUp = (now - scanStartedAt) > settings.timeSecs * 1000;
+  const idle = (now - lastMotionAt) > settings.motionSecs * 1000;
+  if (mode === "never") return null;
+  if (mode === "time") return timeUp ? "time" : null;
+  if (mode === "activity") return idle ? "motion" : null;
+  // "both": whichever triggers first
+  if (idle) return "motion";
+  if (timeUp) return "time";
+  return null;
+}
+
 async function idTick() {
   if (!idLoopActive) return;
-  // Auto-pause after a stretch of scanning; user resumes on demand.
-  if (performance.now() - scanStartedAt > SCAN_MAX_MS) { pauseIdLoop(); return; }
   const c = cams.id;
   // Only auto-scan with a live camera; file fallback uses the manual button.
   if (!c || c.usesFile || !c.stream || !c.video.videoWidth || idBusy || modelState === "loading") {
     scheduleIdTick(ID_INTERVAL);
     return;
   }
+  // Motion tracking + settings-driven auto-pause.
+  if (detectMotion(c.video)) lastMotionAt = performance.now();
+  const pauseReason = shouldPause();
+  if (pauseReason) { pauseIdLoop(pauseReason); return; }
   idBusy = true;
   try {
     const canvas = toWorkCanvas(c.video, c.video.videoWidth, c.video.videoHeight);
@@ -664,7 +809,7 @@ async function idTick() {
 $("#idResumeBtn").addEventListener("click", startIdLoop);
 $("#idCameraWrap").addEventListener("click", () => {
   const c = cams.id;
-  if (!idLoopActive && c && !c.usesFile) startIdLoop();
+  if (settings.autoScan && !idLoopActive && c && !c.usesFile) startIdLoop();
 });
 
 // Manual button: used only in the no-camera file-fallback path.
@@ -699,7 +844,7 @@ function renderIdResults(ranked) {
   } else {
     const top = Math.round(ranked[0].score * 100);
     guide.textContent = ranked[0].score >= 0.55
-      ? `Best match: ${ranked[0].key.for} (${top}%) — tap to confirm`
+      ? `Best match: ${isUnidentified(ranked[0].key) ? "Unidentified key" : ranked[0].key.for} (${top}%) — tap to confirm`
       : `Best guess ${top}% — hold steady or tap a match`;
     html = "<h3>Likely matches</h3>";
     ranked.forEach((r) => {
@@ -709,7 +854,7 @@ function renderIdResults(ranked) {
       html += `<div class="candidate" data-id="${r.key.id}">
         <img class="thumb" src="${thumb}" alt="" />
         <div style="flex:1">
-          <div class="meta"><span class="name">${escapeHtml(r.key.for)}</span>${decom ? ' <span class="badge obsolete">decommissioned</span>' : ""}</div>
+          <div class="meta"><span class="name">${keyLabel(r.key)}</span>${decom ? ' <span class="badge obsolete">decommissioned</span>' : ""}</div>
           <div class="score-bar"><div style="width:${pct}%"></div></div>
           <div class="sub" style="font-size:12px;color:var(--muted);margin-top:4px">${pct}% match${r.key.category ? " · " + escapeHtml(r.key.category) : ""}${r.key.date ? " · " + r.key.date : ""}</div>
         </div>
@@ -733,7 +878,7 @@ async function confirmMatch(id) {
   const probe = lastProbe;
   stopIdLoop(); // pause auto-scan while the dialog is open
   $("#matchDlgTitle").textContent = "Is this the key?";
-  $("#matchDlgBody").innerHTML = `<strong>${escapeHtml(key.for)}</strong>${key.category ? " · " + escapeHtml(key.category) : ""}${key.notes ? "<br>" + escapeHtml(key.notes) : ""}`;
+  $("#matchDlgBody").innerHTML = `<strong>${keyLabel(key)}</strong>${key.category ? " · " + escapeHtml(key.category) : ""}${key.notes ? "<br>" + escapeHtml(key.notes) : ""}`;
   matchDlg.showModal();
   $("#matchDlgYes").onclick = async () => {
     matchDlg.close();
@@ -745,7 +890,7 @@ async function confirmMatch(id) {
         await putKey(key);
       }
     }
-    toast("✓ " + key.for);
+    toast("✓ " + (key.for || "Unidentified key"));
     if ($("#view-identify").classList.contains("active")) startIdLoop();
   };
   $("#matchDlgNo").onclick = () => {
@@ -859,7 +1004,7 @@ function renderStagedThumbs() {
 
 $("#addSaveBtn").addEventListener("click", async () => {
   const forVal = $("#addFor").value.trim();
-  if (!forVal) { toast("Please enter what the key is for."); return; }
+  // "For" may be left blank — the key lands on the "to investigate" list.
   if (!stagedPhotos.length && !editingId) { toast("Add at least one photo."); return; }
 
   let key;
@@ -868,7 +1013,7 @@ $("#addSaveBtn").addEventListener("click", async () => {
   } else {
     key = { id: uid(), createdAt: new Date().toISOString(), fingerprints: [], thumbnails: [] };
   }
-  key.for = forVal;
+  key.for = forVal || null;
   key.category = $("#addCategory").value.trim() || null;
   key.date = $("#addDate").value || null;
   key.status = $("#addStatus").value;
@@ -941,8 +1086,11 @@ async function renderFilterChips(all) {
   const inService = all.filter((k) => !isDecom(k));      // decommissioned excluded by default
   const cats = distinctCategories(inService);
   const count = (fn) => all.filter(fn).length;
+  const unidentified = inService.filter(isUnidentified).length;
   const chips = [
     { f: "active", label: "Active", n: inService.length },
+    // "To investigate" = in-service keys with no "For" yet.
+    ...(unidentified ? [{ f: "unidentified", label: "To investigate", n: unidentified }] : []),
     // Category chips count only in-service keys (decommissioned are hidden unless explicitly requested).
     ...cats.map((c) => ({ f: "cat:" + c, label: c, n: inService.filter((k) => k.category === c).length })),
     { f: "obsolete", label: "Decommissioned", n: count(isDecom) },
@@ -960,8 +1108,9 @@ function matchesFilter(k) {
   // "obsolete" and "all" are the only filters that reveal decommissioned keys.
   if (keysFilter === "obsolete") return isDecom(k);
   if (keysFilter === "all") return true;
-  if (isDecom(k)) return false; // hidden from Active and every category by default
+  if (isDecom(k)) return false; // hidden from Active/category/unidentified by default
   if (keysFilter === "active") return true;
+  if (keysFilter === "unidentified") return isUnidentified(k);
   if (keysFilter.startsWith("cat:")) return k.category === keysFilter.slice(4);
   return true;
 }
@@ -981,8 +1130,8 @@ async function renderKeys() {
     <div class="key-item">
       <img class="thumb" src="${k.thumbnails?.[0] || ""}" alt="" />
       <div class="meta">
-        <div class="name">${escapeHtml(k.for)}</div>
-        <div class="sub">${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
+        <div class="name">${keyLabel(k)}</div>
+        <div class="sub">${isUnidentified(k) ? "🔎 needs identifying · " : ""}${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
       </div>
       <span class="badge ${k.status || "active"}">${k.status === "obsolete" ? "decommissioned" : (k.status || "active")}</span>
     </div>
@@ -1072,6 +1221,13 @@ async function renderStats() {
 }
 
 /* ---------- util ---------- */
+const isUnidentified = (k) => !k.for || !String(k.for).trim();
+// Human label for a key, escaped for HTML. Unidentified keys get a placeholder.
+function keyLabel(k) {
+  return isUnidentified(k)
+    ? '<span style="font-style:italic;color:var(--muted)">Unidentified key</span>'
+    : escapeHtml(k.for);
+}
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -1086,7 +1242,8 @@ if ("serviceWorker" in navigator) {
 
 /* ---------- boot ---------- */
 setDate("");            // initialize the date picker to "no date"
-showView("identify");
+// Default to My Keys (not Identify) so the camera/scan loop don't start on launch — saves battery.
+showView("keys");
 loadModel();
 </script>
 </body>

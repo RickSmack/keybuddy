@@ -31,15 +31,45 @@ best results:
 
 | Tab | What it does |
 |-----|--------------|
-| **Identify** | Capture a key → see ranked matches → tap to confirm, or add it as new. |
-| **Add** | Snap photos, enter what the key is **For**, an optional **Date**, and a status. |
-| **My Keys** | Browse/filter your inventory; edit, **decommission**, reactivate, or delete. |
+| **Identify** | Point the camera at a key — matches appear live; tap one to confirm, or add as new. |
+| **Add** | Snap photos, enter what the key is **For** (optional), plus **Category**, **Date**, and status. |
+| **My Keys** | Browse/filter your inventory by status/category; edit, **decommission**, reactivate, or delete. |
 | **Sync** | Export/import your keys, and reset all data. |
+| **Settings** | Configure auto-scan (on/off) and how it auto-pauses to save battery. |
 
-### Decommissioning obsolete keys
-When a lock or tool is replaced, open the key in **My Keys** and tap **Decommission**. It's kept
-for history but hidden from identification results. The optional **Date** helps you review old
-keys. You can **Reactivate** at any time.
+### Auto-identify and battery
+By default the **Identify** screen scans the live camera continuously and updates the ranked
+matches in real time — no button press. Because that uses more battery than a single capture,
+it **auto-pauses** and shows a **Resume** button (tapping the camera also resumes). In
+**Settings** you can:
+
+- **Enable/disable auto-scan.** When off, Identify uses a manual **Capture** button instead.
+- **Choose when it pauses:** after a period of **no motion** (default 10s), after a **fixed
+  time** (default 25s), **either one** (whichever comes first), or **never**.
+- **Tune both thresholds** with sliders.
+
+### Categories
+Give each key an optional **Category** — a free-form label for grouping, e.g. *"Bert's Keys"*,
+*"Mom's Keys"*, *"Barn"*. **My Keys** shows a filter chip per category (with counts). The
+category box autocompletes from categories you've already used.
+
+### Unidentified keys ("to investigate")
+You don't have to know what a key is for when you add it — **leave the "For" field blank** and
+it's saved as an *Unidentified key*. These collect under a **To investigate** filter in
+**My Keys** so you have a running list to work through. When you figure one out, open it, fill
+in the "For", and save. They're still fingerprinted, so scanning an unknown key can match one
+you already captured.
+
+### Decommissioning keys
+When a lock or tool is replaced, open the key in **My Keys** and tap **Decommission** (the
+optional **Date** helps you review old keys). Decommissioned keys are:
+
+- **Still identifiable** — a key you pick up may be one you previously decommissioned, so it
+  still shows up when scanning (flagged with a *decommissioned* badge in the results).
+- **Hidden from listings by default** — the **Active** chip and every category chip exclude
+  them; only the **Decommissioned** and **All** chips reveal them.
+
+You can **Reactivate** a key at any time.
 
 ---
 
