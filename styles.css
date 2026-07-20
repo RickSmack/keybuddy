@@ -123,7 +123,8 @@
   .thumbs .thumb { width: 64px; height: 64px; position: relative; }
   .thumb-del { position:absolute; top:-6px; right:-6px; background:var(--bad); color:#fff; border:none; border-radius:50%; width:22px; height:22px; font-size:14px; cursor:pointer; line-height:1; }
 
-  .key-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-bottom: 1px solid var(--border); }
+  .key-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .key-item:active { background: var(--panel-2); }
   .key-item:last-child { border-bottom: none; }
   .key-item .meta { flex: 1; min-width: 0; }
   .key-item .meta .name { font-weight: 600; font-size: 15px; }

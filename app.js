@@ -1382,6 +1382,9 @@ async function renderKeys() {
       <button class="key-menu-btn" data-menu="${k.id}" aria-label="Key actions">⋯</button>
     </div>
   `; }).join("");
+  // Tapping the row opens Edit; the ⋯ button stops propagation and opens the menu.
+  $$("#keysList .key-item").forEach((row) =>
+    row.addEventListener("click", () => editKey(row.dataset.id)));
   $$("#keysList .key-menu-btn").forEach((b) =>
     b.addEventListener("click", (e) => { e.stopPropagation(); openKeyMenu(b.dataset.menu, b); }));
 }
