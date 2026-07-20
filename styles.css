@@ -131,6 +131,12 @@
   .key-item .meta { flex: 1; min-width: 0; }
   .key-item .meta .name { font-weight: 600; font-size: 15px; }
   .key-item .meta .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .key-menu-btn {
+    flex-shrink: 0; width: 36px; height: 36px; border-radius: 10px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    font-size: 20px; line-height: 1; cursor: pointer; padding: 0;
+  }
+  .key-menu-btn:active { background: var(--panel); }
   .badge { font-size: 10px; padding: 2px 7px; border-radius: 20px; text-transform: uppercase; letter-spacing: .4px; }
   .badge.active { background: rgba(78,201,127,.15); color: var(--good); }
   .badge.obsolete { background: rgba(224,101,91,.15); color: var(--bad); }
@@ -206,6 +212,17 @@
     border-radius: var(--radius); padding: 20px; width: 88%; max-width: 380px;
   }
   dialog::backdrop { background: rgba(0,0,0,.6); }
+
+  /* per-key action menu */
+  .menu-dialog h3 { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu-list { display: flex; flex-direction: column; gap: 6px; }
+  .menu-item {
+    text-align: left; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 13px 14px; font-size: 15px; cursor: pointer;
+  }
+  .menu-item:active { background: var(--panel); }
+  .menu-item[disabled] { opacity: .45; cursor: default; }
+  .menu-item.danger { color: var(--bad); border-color: rgba(224,101,91,.4); }
 
   /* learned-photo review grid */
   .learned-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }

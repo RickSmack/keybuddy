@@ -1343,46 +1343,66 @@ async function renderKeys() {
   box.innerHTML = list.map((k) => {
     const learnedCount = (k.fingerprints || []).filter((f) => f && f.source === "learn").length;
     return `
-    <div class="key-item">
+    <div class="key-item" data-id="${k.id}">
       <img class="thumb" src="${k.thumbnails?.[0] || ""}" alt="" />
       <div class="meta">
         <div class="name">${keyLabel(k)}</div>
         <div class="sub">${isUnidentified(k) ? "🔎 needs identifying · " : ""}${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${(k.locations && k.locations.length) ? "📍 " + k.locations.map(escapeHtml).join(", ") + " · " : ""}${k.date ? k.date + " · " : ""}${(k.thumbnails || []).length} photo(s)${learnedCount ? " · " + learnedCount + " learned" : ""}${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
       </div>
-      <span class="badge ${k.status || "active"}">${k.status === "obsolete" ? "decommissioned" : (k.status || "active")}</span>
+      ${isDecom(k) ? '<span class="badge obsolete">decommissioned</span>' : ""}
+      <button class="key-menu-btn" data-menu="${k.id}" aria-label="Key actions">⋯</button>
     </div>
-    <div style="padding:0 12px 6px" data-id="${k.id}">
-      <button class="btn find-btn" ${(k.fingerprints || []).length ? "" : "disabled"}>🔦 Find in pile</button>
-    </div>
-    <div class="row" style="padding:0 12px 12px" data-id="${k.id}">
-      <button class="btn secondary edit-btn">Edit</button>
-      <button class="btn secondary toggle-btn">${(k.status === "obsolete") ? "Reactivate" : "Decommission"}</button>
-      <button class="btn danger del-btn">Delete</button>
-    </div>
-    ${learnedCount ? `<div style="padding:0 12px 12px" data-id="${k.id}"><button class="btn secondary learned-btn">🖼️ Review ${learnedCount} improvement photo(s)</button></div>` : ""}
   `; }).join("");
-  $$("#keysList .find-btn").forEach((b) =>
-    b.addEventListener("click", () => startFindInPile(b.closest("[data-id]").dataset.id)));
-  $$("#keysList .learned-btn").forEach((b) =>
-    b.addEventListener("click", () => reviewLearned(b.closest("[data-id]").dataset.id)));
-  $$("#keysList .edit-btn").forEach((b) =>
-    b.addEventListener("click", () => editKey(b.closest("[data-id]").dataset.id)));
-  $$("#keysList .toggle-btn").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const id = b.closest("[data-id]").dataset.id;
-      const k = await getKey(id); if (!k) return;
-      k.status = (k.status === "obsolete") ? "active" : "obsolete";
-      k.updatedAt = new Date().toISOString();
-      await putKey(k); renderKeys();
-      toast(k.status === "obsolete" ? "Decommissioned" : "Reactivated");
-    }));
-  $$("#keysList .del-btn").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const id = b.closest("[data-id]").dataset.id;
-      if (!confirm("Delete this key permanently?")) return;
-      await deleteKey(id); renderKeys(); toast("Deleted");
-    }));
+  $$("#keysList .key-menu-btn").forEach((b) =>
+    b.addEventListener("click", (e) => { e.stopPropagation(); openKeyMenu(b.dataset.menu, b); }));
 }
+
+/* ---------- per-key action menu (popover) ---------- */
+const keyMenu = $("#keyMenu");
+let keyMenuId = null;
+
+async function openKeyMenu(id, anchor) {
+  const k = await getKey(id);
+  if (!k) return;
+  keyMenuId = id;
+  const learnedCount = (k.fingerprints || []).filter((f) => f && f.source === "learn").length;
+  const hasFp = (k.fingerprints || []).length > 0;
+  const items = [
+    { act: "find", label: "🔦 Find in pile", disabled: !hasFp },
+    { act: "edit", label: "✏️ Edit" },
+    { act: "toggle", label: isDecom(k) ? "♻️ Reactivate" : "📴 Decommission" },
+    ...(learnedCount ? [{ act: "review", label: `🖼️ Review ${learnedCount} improvement photo(s)` }] : []),
+    { act: "delete", label: "🗑️ Delete", danger: true },
+  ];
+  $("#keyMenuTitle").textContent = k.for || "Unidentified key";
+  $("#keyMenuList").innerHTML = items.map((it) =>
+    `<button class="menu-item${it.danger ? " danger" : ""}" data-act="${it.act}" ${it.disabled ? "disabled" : ""}>${it.label}</button>`).join("");
+  $$("#keyMenuList .menu-item[data-act]").forEach((el) =>
+    el.addEventListener("click", () => handleKeyMenuAction(el.dataset.act)));
+  keyMenu.showModal();
+}
+
+async function handleKeyMenuAction(act) {
+  const id = keyMenuId;
+  keyMenu.close();
+  if (!id) return;
+  if (act === "find") return startFindInPile(id);
+  if (act === "edit") return editKey(id);
+  if (act === "review") return reviewLearned(id);
+  if (act === "toggle") {
+    const k = await getKey(id); if (!k) return;
+    k.status = (k.status === "obsolete") ? "active" : "obsolete";
+    k.updatedAt = new Date().toISOString();
+    await putKey(k); renderKeys();
+    toast(k.status === "obsolete" ? "Decommissioned" : "Reactivated");
+    return;
+  }
+  if (act === "delete") {
+    if (!confirm("Delete this key permanently?")) return;
+    await deleteKey(id); renderKeys(); toast("Deleted");
+  }
+}
+on("#keyMenuClose", "click", () => keyMenu.close());
 
 /* ---------- SYNC ---------- */
 on("#exportBtn", "click", async () => {
