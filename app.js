@@ -1,0 +1,1242 @@
+"use strict";
+/* ============================================================
+   Key Buddy — all app logic (kept inline for single-file delivery)
+   Data lives in IndexedDB on THIS device only; the file ships blank.
+   ============================================================ */
+
+/* ---------- tiny helpers ---------- */
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+let toastTimer;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+/* ---------- IndexedDB layer ---------- */
+const DB_NAME = "keybuddy";
+const STORE = "keys";
+let _db;
+function db() {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains(STORE)) {
+        d.createObjectStore(STORE, { keyPath: "id" });
+      }
+    };
+    req.onsuccess = () => { _db = req.result; resolve(_db); };
+    req.onerror = () => reject(req.error);
+  });
+}
+// Run one request against the store and resolve with its result.
+async function req(mode, fn) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const t = d.transaction(STORE, mode);
+    const request = fn(t.objectStore(STORE));
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+const putKey = (key) => req("readwrite", (s) => s.put(key));
+const deleteKey = (id) => req("readwrite", (s) => s.delete(id));
+const getAllKeys = () => req("readonly", (s) => s.getAll()).then((r) => r || []).catch(() => []);
+const getKey = (id) => req("readonly", (s) => s.get(id)).then((r) => r || null).catch(() => null);
+function uid() {
+  return "k_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+/* ---------- model loading ---------- */
+// Self-hosted MobileNet v1 (1.0/224). We load the full layers model and build an
+// intermediate model that outputs the 1024-d global-average-pool embedding.
+let embedModel = null;       // tf model: image -> 1024-d embedding
+let modelState = "loading";  // loading | ready | error
+const EMBED_LAYER = "global_average_pooling2d_1";
+function setModelStatus(state, label) {
+  modelState = state;
+  const dot = $("#modelDot");
+  dot.className = "dot " + (state === "ready" ? "ready" : state === "error" ? "error" : "loading");
+  $("#modelLabel").textContent = label;
+}
+async function loadModel() {
+  setModelStatus("loading", "loading model…");
+  try {
+    await tf.ready();
+    const full = await tf.loadLayersModel("vendor/mobilenet/model.json");
+    const embedLayer = full.getLayer(EMBED_LAYER);
+    embedModel = tf.model({ inputs: full.inputs, outputs: embedLayer.output });
+    // warm up
+    const warm = tf.zeros([1, CAP, CAP, 3]);
+    embedModel.predict(warm).dispose();
+    warm.dispose();
+    setModelStatus("ready", "ready");
+  } catch (e) {
+    console.error(e);
+    setModelStatus("error", "model offline");
+    toast("Model failed to load — matching uses shape only until reload.");
+  }
+}
+
+/* ---------- image / fingerprint pipeline ---------- */
+const CAP = 224; // working square size
+
+// Draw a source (video/img/canvas) center-cropped square into a canvas at CAP size.
+function toWorkCanvas(src, sw, sh) {
+  const c = document.createElement("canvas");
+  c.width = CAP; c.height = CAP;
+  const ctx = c.getContext("2d");
+  const side = Math.min(sw, sh);
+  const sx = (sw - side) / 2, sy = (sh - side) / 2;
+  ctx.drawImage(src, sx, sy, side, side, 0, 0, CAP, CAP);
+  return c;
+}
+
+/* ---------- Tier 0: OpenCV preprocessing ---------- */
+// True once the async opencv.js runtime has finished initializing.
+let cvReady = false;
+if (typeof window !== "undefined") {
+  // opencv.js sets Module.onRuntimeInitialized; poll as a robust fallback.
+  const cvPoll = setInterval(() => {
+    if (window.cv && cv.Mat) { cvReady = true; clearInterval(cvPoll); }
+  }, 200);
+  setTimeout(() => clearInterval(cvPoll), 20000);
+}
+
+// Use OpenCV to find the dominant key contour, deskew via its min-area rect,
+// and return a tightened, upright CAP-square crop. Falls back to the plain
+// center crop if OpenCV isn't ready or no confident contour is found.
+function refineKeyCrop(workCanvas) {
+  if (!cvReady) return workCanvas;
+  let src, gray, blur, edges, contours, hier;
+  try {
+    src = cv.imread(workCanvas);
+    gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+    edges = new cv.Mat();
+    cv.threshold(blur, edges, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    // largest contour by area
+    contours = new cv.MatVector();
+    hier = new cv.Mat();
+    cv.findContours(edges, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let best = -1, bestArea = 0;
+    for (let i = 0; i < contours.size(); i++) {
+      const a = cv.contourArea(contours.get(i));
+      if (a > bestArea) { bestArea = a; best = i; }
+    }
+    const frameArea = workCanvas.width * workCanvas.height;
+    // require the key to be a meaningful but not full-frame region
+    if (best < 0 || bestArea < frameArea * 0.02 || bestArea > frameArea * 0.95) {
+      return workCanvas;
+    }
+    const rect = cv.minAreaRect(contours.get(best));
+    let angle = rect.angle;
+    let w = rect.size.width, h = rect.size.height;
+    // rotate so the key's long axis is horizontal
+    if (w < h) { [w, h] = [h, w]; angle += 90; }
+    const M = cv.getRotationMatrix2D(rect.center, angle, 1);
+    const rotated = new cv.Mat();
+    cv.warpAffine(src, rotated, M, new cv.Size(src.cols, src.rows),
+      cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 255));
+    // crop the upright bounding box (with small padding)
+    const padW = w * 0.10, padH = h * 0.10;
+    const rw = Math.min(src.cols, Math.round(w + padW * 2));
+    const rh = Math.min(src.rows, Math.round(h + padH * 2));
+    const cx = Math.round(rect.center.x), cy = Math.round(rect.center.y);
+    let x = Math.max(0, cx - Math.round(rw / 2));
+    let y = Math.max(0, cy - Math.round(rh / 2));
+    x = Math.min(x, src.cols - rw); y = Math.min(y, src.rows - rh);
+    const roi = rotated.roi(new cv.Rect(x, y, rw, rh));
+    // letterbox roi into a CAP square
+    const out = document.createElement("canvas");
+    out.width = CAP; out.height = CAP;
+    const octx = out.getContext("2d");
+    octx.fillStyle = "#000"; octx.fillRect(0, 0, CAP, CAP);
+    const tmp = document.createElement("canvas");
+    cv.imshow(tmp, roi);
+    const s = Math.min(CAP / tmp.width, CAP / tmp.height);
+    const dw = tmp.width * s, dh = tmp.height * s;
+    octx.drawImage(tmp, (CAP - dw) / 2, (CAP - dh) / 2, dw, dh);
+    rotated.delete(); roi.delete(); M.delete();
+    return out;
+  } catch (e) {
+    return workCanvas; // any OpenCV hiccup → safe fallback
+  } finally {
+    [src, gray, blur, edges, hier].forEach((m) => { try { m && m.delete(); } catch (_) {} });
+    try { contours && contours.delete(); } catch (_) {}
+  }
+}
+
+// Small JPEG thumbnail for storage/display.
+function canvasToThumb(canvas, size = 160) {
+  const c = document.createElement("canvas");
+  c.width = size; c.height = size;
+  c.getContext("2d").drawImage(canvas, 0, 0, size, size);
+  return c.toDataURL("image/jpeg", 0.7);
+}
+
+// Otsu threshold on grayscale to isolate the key silhouette (assumes plain bg).
+function silhouette(canvas) {
+  const ctx = canvas.getContext("2d");
+  const { data } = ctx.getImageData(0, 0, CAP, CAP);
+  const gray = new Uint8Array(CAP * CAP);
+  const hist = new Array(256).fill(0);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const g = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+    gray[p] = g; hist[g]++;
+  }
+  // Otsu
+  const total = CAP * CAP;
+  let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0, wB = 0, max = 0, thr = 127;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue;
+    const wF = total - wB; if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > max) { max = between; thr = t; }
+  }
+  // Decide polarity: key is the minority region typically; treat darker OR lighter as foreground
+  let darkCount = 0; for (let p = 0; p < total; p++) if (gray[p] < thr) darkCount++;
+  const keyIsDark = darkCount < total / 2;
+  const mask = new Uint8Array(total);
+  for (let p = 0; p < total; p++) {
+    const fg = keyIsDark ? gray[p] < thr : gray[p] >= thr;
+    mask[p] = fg ? 1 : 0;
+  }
+  return mask;
+}
+
+// Column-profile "bitting-ish" descriptor + normalized bbox aspect. 32 buckets.
+function shapeDescriptor(mask) {
+  const N = 32;
+  const colTop = new Array(CAP).fill(-1);
+  const colBot = new Array(CAP).fill(-1);
+  let minX = CAP, maxX = -1, minY = CAP, maxY = -1;
+  for (let x = 0; x < CAP; x++) {
+    for (let y = 0; y < CAP; y++) {
+      if (mask[y * CAP + x]) {
+        if (colTop[x] < 0) colTop[x] = y;
+        colBot[x] = y;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+  const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
+  const prof = new Array(N).fill(0);
+  for (let b = 0; b < N; b++) {
+    const x = Math.round(minX + (b / (N - 1)) * w);
+    if (colTop[x] >= 0) prof[b] = (colBot[x] - colTop[x]) / h; // relative thickness
+  }
+  return { profile: prof, aspect: w / h };
+}
+
+// 8x8 average-hash perceptual hash from grayscale.
+function pHash(canvas) {
+  const c = document.createElement("canvas"); c.width = 8; c.height = 8;
+  c.getContext("2d").drawImage(canvas, 0, 0, 8, 8);
+  const d = c.getContext("2d").getImageData(0, 0, 8, 8).data;
+  const g = [];
+  let sum = 0;
+  for (let i = 0; i < d.length; i += 4) { const v = d[i] * .299 + d[i+1]*.587 + d[i+2]*.114; g.push(v); sum += v; }
+  const avg = sum / 64;
+  return g.map((v) => (v > avg ? 1 : 0));
+}
+
+// Full fingerprint from a work canvas.
+// refine=true (default) runs Tier-0 OpenCV deskew/tighten first; pass false for
+// inputs that are already tightly cropped (e.g. Find-in-Pile blobs).
+async function fingerprint(workCanvas, refine = true) {
+  if (refine) workCanvas = refineKeyCrop(workCanvas);
+  const fp = { phash: pHash(workCanvas) };
+  const mask = silhouette(workCanvas);
+  fp.shape = shapeDescriptor(mask);
+  if (embedModel) {
+    const emb = tf.tidy(() => {
+      // MobileNet v1 expects inputs scaled to [-1, 1].
+      const t = tf.browser.fromPixels(workCanvas).toFloat()
+        .div(127.5).sub(1).expandDims(0);
+      return embedModel.predict(t).flatten();
+    });
+    const arr = await emb.data();
+    emb.dispose();
+    fp.embedding = Array.from(arr);
+  }
+  return fp;
+}
+
+/* ---------- pile segmentation (Find in Pile) ---------- */
+// Analyze a full photo: threshold, label connected blobs, keep key-sized ones,
+// and return { canvas, W, H, blobs:[{x,y,w,h,area}] } at a working resolution.
+function segmentPile(src, sw, sh) {
+  const MAXW = 480; // working width; keeps CC fast on phones
+  const scale = Math.min(1, MAXW / sw);
+  const W = Math.round(sw * scale), H = Math.round(sh * scale);
+  const work = document.createElement("canvas");
+  work.width = W; work.height = H;
+  const ctx = work.getContext("2d");
+  ctx.drawImage(src, 0, 0, W, H);
+  const data = ctx.getImageData(0, 0, W, H).data;
+
+  // grayscale + Otsu threshold (reused idea from silhouette)
+  const total = W * H;
+  const gray = new Uint8Array(total);
+  const hist = new Array(256).fill(0);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const g = (data[i] * .299 + data[i+1] * .587 + data[i+2] * .114) | 0;
+    gray[p] = g; hist[g]++;
+  }
+  let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0, wB = 0, max = 0, thr = 127;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue;
+    const wF = total - wB; if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > max) { max = between; thr = t; }
+  }
+  let darkCount = 0; for (let p = 0; p < total; p++) if (gray[p] < thr) darkCount++;
+  const keyIsDark = darkCount < total / 2; // keys are the minority foreground
+  const fg = new Uint8Array(total);
+  for (let p = 0; p < total; p++) fg[p] = (keyIsDark ? gray[p] < thr : gray[p] >= thr) ? 1 : 0;
+
+  // connected components (4-neighbour flood fill via stack)
+  const labels = new Int32Array(total).fill(0);
+  const blobs = [];
+  const stack = [];
+  let next = 0;
+  for (let start = 0; start < total; start++) {
+    if (!fg[start] || labels[start]) continue;
+    next++;
+    let minX = W, minY = H, maxX = 0, maxY = 0, area = 0;
+    stack.push(start); labels[start] = next;
+    while (stack.length) {
+      const p = stack.pop();
+      const x = p % W, y = (p / W) | 0;
+      area++;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (x > 0     && fg[p-1] && !labels[p-1]) { labels[p-1] = next; stack.push(p-1); }
+      if (x < W-1   && fg[p+1] && !labels[p+1]) { labels[p+1] = next; stack.push(p+1); }
+      if (y > 0     && fg[p-W] && !labels[p-W]) { labels[p-W] = next; stack.push(p-W); }
+      if (y < H-1   && fg[p+W] && !labels[p+W]) { labels[p+W] = next; stack.push(p+W); }
+    }
+    blobs.push({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area });
+  }
+  // Keep plausibly key-sized blobs: not too tiny (noise), not the whole frame (background).
+  const minArea = total * 0.002, maxArea = total * 0.6;
+  const kept = blobs.filter((b) => b.area >= minArea && b.area <= maxArea && b.w > 6 && b.h > 6);
+  return { canvas: work, W, H, blobs: kept };
+}
+
+// Crop a blob (with padding) out of the working canvas into a CAP-square canvas.
+function cropBlob(workCanvas, b) {
+  const pad = Math.round(Math.max(b.w, b.h) * 0.12);
+  const x = Math.max(0, b.x - pad), y = Math.max(0, b.y - pad);
+  const w = Math.min(workCanvas.width - x, b.w + pad * 2);
+  const h = Math.min(workCanvas.height - y, b.h + pad * 2);
+  const c = document.createElement("canvas");
+  c.width = CAP; c.height = CAP;
+  // letterbox the blob into the square so aspect is preserved
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, CAP, CAP);
+  const s = Math.min(CAP / w, CAP / h);
+  const dw = w * s, dh = h * s;
+  ctx.drawImage(workCanvas, x, y, w, h, (CAP - dw) / 2, (CAP - dh) / 2, dw, dh);
+  return c;
+}
+
+/* ---------- similarity ---------- */
+function cosine(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+function profileSim(a, b) {
+  if (!a || !b) return 0;
+  let sse = 0;
+  for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; sse += d * d; }
+  const rmse = Math.sqrt(sse / a.length);
+  return Math.max(0, 1 - rmse); // 0..1
+}
+function hammingSim(a, b) {
+  if (!a || !b) return 0;
+  let same = 0; for (let i = 0; i < a.length; i++) if (a[i] === b[i]) same++;
+  return same / a.length;
+}
+// Combined score of a probe fingerprint vs one stored fingerprint.
+function fpScore(probe, stored) {
+  const emb = probe.embedding && stored.embedding ? cosine(probe.embedding, stored.embedding) : null;
+  const shp = profileSim(probe.shape?.profile, stored.shape?.profile);
+  const asp = stored.shape && probe.shape
+    ? Math.max(0, 1 - Math.abs(probe.shape.aspect - stored.shape.aspect) / 1.5) : 0;
+  const ph = hammingSim(probe.phash, stored.phash);
+  if (emb === null) {
+    // no model: rely on shape + phash
+    return 0.55 * shp + 0.20 * asp + 0.25 * ph;
+  }
+  return 0.60 * emb + 0.22 * shp + 0.08 * asp + 0.10 * ph;
+}
+// Best score of probe vs a key (which may hold several fingerprints).
+function keyScore(probe, key) {
+  let best = 0;
+  for (const sfp of key.fingerprints || []) best = Math.max(best, fpScore(probe, sfp));
+  return best;
+}
+
+/* ---------- camera ---------- */
+const cams = {}; // viewName -> {stream, video, wrap, usesFile}
+async function startCamera(view) {
+  const video = $("#" + view + "Video");
+  const wrap = $("#" + view + "CameraWrap");
+  const fileInput = $("#" + view + "FileInput");
+  cams[view] = cams[view] || {};
+  cams[view].video = video; cams[view].wrap = wrap; cams[view].fileInput = fileInput;
+  if (cams[view].stream) return; // already running
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } }, audio: false,
+    });
+    cams[view].stream = stream;
+    cams[view].usesFile = false;
+    video.srcObject = stream;
+    video.hidden = false;
+    await video.play().catch(() => {});
+  } catch (e) {
+    // Fallback to file capture (e.g. no permission / insecure context)
+    cams[view].usesFile = true;
+    video.hidden = true;
+    if (view === "id") {
+      // no live preview → force manual capture regardless of auto-scan setting
+      stopIdLoop();
+      $("#idResumeBtn").hidden = true;
+      $("#idFallbackHint").hidden = false;
+      $("#idCaptureBtn").hidden = false;
+      $("#idGuideText").textContent = "Tap Capture to take a photo";
+    }
+  }
+}
+function stopCamera(view) {
+  const c = cams[view];
+  if (c?.stream) { c.stream.getTracks().forEach((t) => t.stop()); c.stream = null; }
+}
+// Capture a work canvas from a view's camera, or open file picker (returns Promise<canvas|null>).
+function capture(view) {
+  return new Promise((resolve) => {
+    const c = cams[view];
+    if (c && !c.usesFile && c.stream && c.video.videoWidth) {
+      resolve(toWorkCanvas(c.video, c.video.videoWidth, c.video.videoHeight));
+      return;
+    }
+    // file fallback
+    const fi = $("#" + view + "FileInput");
+    fi.value = "";
+    fi.onchange = () => {
+      const f = fi.files[0];
+      if (!f) return resolve(null);
+      const img = new Image();
+      img.onload = () => resolve(toWorkCanvas(img, img.naturalWidth, img.naturalHeight));
+      img.onerror = () => resolve(null);
+      img.src = URL.createObjectURL(f);
+    };
+    fi.click();
+  });
+}
+
+// Capture the FULL frame (not center-cropped) as a canvas — used by Find in Pile,
+// which needs the whole scene to locate keys. Downscales very large frames.
+function captureFull(view) {
+  const drawFull = (srcW, srcH, drawFn) => {
+    const MAX = 1280;
+    const scale = Math.min(1, MAX / Math.max(srcW, srcH));
+    const c = document.createElement("canvas");
+    c.width = Math.round(srcW * scale); c.height = Math.round(srcH * scale);
+    drawFn(c.getContext("2d"), c.width, c.height);
+    return c;
+  };
+  return new Promise((resolve) => {
+    const c = cams[view];
+    if (c && !c.usesFile && c.stream && c.video.videoWidth) {
+      resolve(drawFull(c.video.videoWidth, c.video.videoHeight,
+        (ctx, w, h) => ctx.drawImage(c.video, 0, 0, w, h)));
+      return;
+    }
+    const fi = $("#" + view + "FileInput");
+    fi.value = "";
+    fi.onchange = () => {
+      const f = fi.files[0];
+      if (!f) return resolve(null);
+      const img = new Image();
+      img.onload = () => resolve(drawFull(img.naturalWidth, img.naturalHeight,
+        (ctx, w, h) => ctx.drawImage(img, 0, 0, w, h)));
+      img.onerror = () => resolve(null);
+      img.src = URL.createObjectURL(f);
+    };
+    fi.click();
+  });
+}
+
+/* ---------- settings (persisted in localStorage) ---------- */
+const SETTINGS_KEY = "keybuddy.settings";
+const DEFAULT_SETTINGS = {
+  autoScan: true,
+  pauseMode: "both",   // "both" | "activity" | "time" | "never"
+  motionSecs: 10,      // pause after this many seconds with no motion
+  timeSecs: 25,        // pause after this many total seconds
+};
+let settings = loadSettings();
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS };
+  } catch (_) { return { ...DEFAULT_SETTINGS }; }
+}
+function saveSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (_) {}
+}
+
+function renderSettings() {
+  $("#setAutoScan").checked = settings.autoScan;
+  $("#setPauseMode").value = settings.pauseMode;
+  $("#setMotionSecs").value = settings.motionSecs;
+  $("#setMotionSecsVal").textContent = settings.motionSecs + "s";
+  $("#setTimeSecs").value = settings.timeSecs;
+  $("#setTimeSecsVal").textContent = settings.timeSecs + "s";
+  // enable/disable dependent controls
+  $("#autoScanOpts").classList.toggle("disabled", !settings.autoScan);
+  const mode = settings.pauseMode;
+  $("#setMotionRow").style.display = (mode === "activity" || mode === "both") ? "" : "none";
+  $("#setTimeRow").style.display = (mode === "time" || mode === "both") ? "" : "none";
+}
+$("#setAutoScan").addEventListener("change", (e) => { settings.autoScan = e.target.checked; saveSettings(); renderSettings(); });
+$("#setPauseMode").addEventListener("change", (e) => { settings.pauseMode = e.target.value; saveSettings(); renderSettings(); });
+$("#setMotionSecs").addEventListener("input", (e) => { settings.motionSecs = +e.target.value; $("#setMotionSecsVal").textContent = settings.motionSecs + "s"; saveSettings(); });
+$("#setTimeSecs").addEventListener("input", (e) => { settings.timeSecs = +e.target.value; $("#setTimeSecsVal").textContent = settings.timeSecs + "s"; saveSettings(); });
+
+/* ---------- navigation ---------- */
+function showView(name) {
+  $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + name));
+  $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
+  // camera lifecycle — map each camera key to the view that uses it
+  const CAM_VIEW = { id: "identify", add: "add", find: "find" };
+  Object.entries(CAM_VIEW).forEach(([camKey, viewName]) => {
+    if (viewName === name) startCamera(camKey); else stopCamera(camKey);
+  });
+  // auto-identify loop only runs on the Identify view (and only if enabled)
+  if (name === "identify") enterIdentify(); else stopIdLoop();
+  if (name === "add") { renderDatePicker(); refreshCategoryList(); }
+  if (name === "keys") renderKeys();
+  if (name === "sync") renderStats();
+  if (name === "settings") renderSettings();
+}
+$$("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
+
+/* ---------- IDENTIFY flow (continuous auto-identify) ---------- */
+let idLoopActive = false;   // loop should keep running
+let idBusy = false;         // an inference is in flight
+let lastProbe = null, lastCanvas = null;
+let scanStartedAt = 0;      // when the current scanning run began
+let lastMotionAt = 0;       // last time motion was detected
+let motionPrev = null;      // previous downscaled frame for motion diff
+const ID_INTERVAL = 1200;   // ms between inference attempts
+const MOTION_THRESH = 8;    // mean per-pixel gray delta counted as "motion"
+
+// Called when entering the Identify view: start auto-scan if enabled,
+// otherwise fall back to the manual capture button.
+function enterIdentify() {
+  const c = cams.id;
+  if (settings.autoScan && !(c && c.usesFile)) {
+    $("#idCaptureBtn").hidden = true;
+    startIdLoop();
+  } else {
+    stopIdLoop();
+    $("#idResumeBtn").hidden = true;
+    $("#idCaptureBtn").hidden = false;
+    $("#idGuideText").textContent = "Tap Capture to identify a key";
+  }
+}
+
+function startIdLoop() {
+  if (idLoopActive) return;
+  idLoopActive = true;
+  const now = performance.now();
+  scanStartedAt = now;
+  lastMotionAt = now;
+  motionPrev = null;
+  hideScanPaused();
+  $("#idGuideText").textContent = "Point at a key — matching automatically…";
+  scheduleIdTick(300);
+}
+function stopIdLoop() { idLoopActive = false; }
+function pauseIdLoop(reason) {
+  idLoopActive = false;
+  showScanPaused(reason);
+}
+function scheduleIdTick(delay) {
+  if (!idLoopActive) return;
+  setTimeout(idTick, delay);
+}
+function showScanPaused(reason) {
+  $("#idGuideText").textContent = reason === "motion"
+    ? "Paused (no motion) — tap to resume"
+    : "Scanning paused to save battery";
+  const btn = $("#idResumeBtn");
+  if (btn) btn.hidden = false;
+}
+function hideScanPaused() {
+  const btn = $("#idResumeBtn");
+  if (btn) btn.hidden = true;
+}
+
+// Cheap frame-to-frame motion: mean absolute gray delta on a 32x32 downscale.
+function detectMotion(video) {
+  const S = 32;
+  const c = document.createElement("canvas"); c.width = S; c.height = S;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(video, 0, 0, S, S);
+  const d = ctx.getImageData(0, 0, S, S).data;
+  const cur = new Uint8Array(S * S);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) cur[p] = (d[i] * .299 + d[i+1] * .587 + d[i+2] * .114) | 0;
+  let moved = false;
+  if (motionPrev) {
+    let sum = 0;
+    for (let p = 0; p < cur.length; p++) sum += Math.abs(cur[p] - motionPrev[p]);
+    if (sum / cur.length > MOTION_THRESH) moved = true;
+  }
+  motionPrev = cur;
+  return moved;
+}
+
+// Decide whether to auto-pause based on the user's settings.
+function shouldPause() {
+  const now = performance.now();
+  const mode = settings.pauseMode;
+  const timeUp = (now - scanStartedAt) > settings.timeSecs * 1000;
+  const idle = (now - lastMotionAt) > settings.motionSecs * 1000;
+  if (mode === "never") return null;
+  if (mode === "time") return timeUp ? "time" : null;
+  if (mode === "activity") return idle ? "motion" : null;
+  // "both": whichever triggers first
+  if (idle) return "motion";
+  if (timeUp) return "time";
+  return null;
+}
+
+async function idTick() {
+  if (!idLoopActive) return;
+  const c = cams.id;
+  // Only auto-scan with a live camera; file fallback uses the manual button.
+  if (!c || c.usesFile || !c.stream || !c.video.videoWidth || idBusy || modelState === "loading") {
+    scheduleIdTick(ID_INTERVAL);
+    return;
+  }
+  // Motion tracking + settings-driven auto-pause.
+  if (detectMotion(c.video)) lastMotionAt = performance.now();
+  const pauseReason = shouldPause();
+  if (pauseReason) { pauseIdLoop(pauseReason); return; }
+  idBusy = true;
+  try {
+    const canvas = toWorkCanvas(c.video, c.video.videoWidth, c.video.videoHeight);
+    const probe = await fingerprint(canvas);
+    lastProbe = probe; lastCanvas = canvas;
+    // Identify against ALL keys, including decommissioned ones — a key you're
+    // holding may well be one that was previously decommissioned.
+    const keys = await getAllKeys();
+    const ranked = keys.map((k) => ({ key: k, score: keyScore(probe, k) }))
+      .sort((a, b) => b.score - a.score).slice(0, 3);
+    renderIdResults(ranked);
+  } catch (e) {
+    /* transient frame error — just try again next tick */
+  } finally {
+    idBusy = false;
+    scheduleIdTick(ID_INTERVAL);
+  }
+}
+
+// Resume scanning after an auto-pause (button or tapping the camera view).
+$("#idResumeBtn").addEventListener("click", startIdLoop);
+$("#idCameraWrap").addEventListener("click", () => {
+  const c = cams.id;
+  if (settings.autoScan && !idLoopActive && c && !c.usesFile) startIdLoop();
+});
+
+// Manual button: used only in the no-camera file-fallback path.
+$("#idCaptureBtn").addEventListener("click", async () => {
+  const btn = $("#idCaptureBtn");
+  const canvas = await capture("id");
+  if (!canvas) return;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Analyzing…';
+  try {
+    const probe = await fingerprint(canvas);
+    lastProbe = probe; lastCanvas = canvas;
+    // Identify against ALL keys, including decommissioned ones — a key you're
+    // holding may well be one that was previously decommissioned.
+    const keys = await getAllKeys();
+    const ranked = keys.map((k) => ({ key: k, score: keyScore(probe, k) }))
+      .sort((a, b) => b.score - a.score).slice(0, 3);
+    renderIdResults(ranked);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = "📸 Capture &amp; Identify";
+  }
+});
+
+function renderIdResults(ranked) {
+  const box = $("#idResults");
+  const guide = $("#idGuideText");
+  let html = "";
+  if (!ranked.length) {
+    guide.textContent = "No keys stored yet — add one below";
+    html = '<h3>No keys stored yet</h3><p class="hint">Add this key so Key Buddy can recognize it next time.</p>';
+  } else {
+    const top = Math.round(ranked[0].score * 100);
+    guide.textContent = ranked[0].score >= 0.55
+      ? `Best match: ${isUnidentified(ranked[0].key) ? "Unidentified key" : ranked[0].key.for} (${top}%) — tap to confirm`
+      : `Best guess ${top}% — hold steady or tap a match`;
+    html = "<h3>Likely matches</h3>";
+    ranked.forEach((r) => {
+      const pct = Math.round(r.score * 100);
+      const thumb = r.key.thumbnails?.[0] || "";
+      const decom = r.key.status === "obsolete";
+      html += `<div class="candidate" data-id="${r.key.id}">
+        <img class="thumb" src="${thumb}" alt="" />
+        <div style="flex:1">
+          <div class="meta"><span class="name">${keyLabel(r.key)}</span>${decom ? ' <span class="badge obsolete">decommissioned</span>' : ""}</div>
+          <div class="score-bar"><div style="width:${pct}%"></div></div>
+          <div class="sub" style="font-size:12px;color:var(--muted);margin-top:4px">${pct}% match${r.key.category ? " · " + escapeHtml(r.key.category) : ""}${r.key.date ? " · " + r.key.date : ""}</div>
+        </div>
+      </div>`;
+    });
+  }
+  html += `<button class="btn secondary" id="idAddNew" style="margin-top:6px">➕ None of these — add as new key</button>`;
+  box.innerHTML = html;
+
+  $$("#idResults .candidate").forEach((el) => {
+    el.addEventListener("click", () => confirmMatch(el.dataset.id));
+  });
+  $("#idAddNew").addEventListener("click", () => beginAddFromCapture());
+}
+
+let pendingCapture = null;
+const matchDlg = $("#matchDialog");
+async function confirmMatch(id) {
+  const key = await getKey(id);
+  if (!key) return;
+  const probe = lastProbe;
+  stopIdLoop(); // pause auto-scan while the dialog is open
+  $("#matchDlgTitle").textContent = "Is this the key?";
+  $("#matchDlgBody").innerHTML = `<strong>${keyLabel(key)}</strong>${key.category ? " · " + escapeHtml(key.category) : ""}${key.notes ? "<br>" + escapeHtml(key.notes) : ""}`;
+  matchDlg.showModal();
+  $("#matchDlgYes").onclick = async () => {
+    matchDlg.close();
+    // strengthen the key by storing this new fingerprint (cap at 5)
+    if (probe) {
+      key.fingerprints = key.fingerprints || [];
+      if (key.fingerprints.length < 5) {
+        key.fingerprints.push(probe);
+        await putKey(key);
+      }
+    }
+    toast("✓ " + (key.for || "Unidentified key"));
+    if ($("#view-identify").classList.contains("active")) startIdLoop();
+  };
+  $("#matchDlgNo").onclick = () => {
+    matchDlg.close();
+    if ($("#view-identify").classList.contains("active")) startIdLoop();
+  };
+}
+
+function beginAddFromCapture() {
+  // carry the most recent live frame into the Add view
+  if (lastCanvas && lastProbe) {
+    pendingCapture = { canvas: lastCanvas, probe: lastProbe };
+  }
+  showView("add");
+  if (pendingCapture) {
+    stagedPhotos = [{ canvas: pendingCapture.canvas, thumb: canvasToThumb(pendingCapture.canvas), fp: pendingCapture.probe }];
+    renderStagedThumbs();
+    toast("Photo carried over — just add a label.");
+  }
+}
+
+/* ---------- FIND IN PILE flow ---------- */
+let findTargetKey = null;   // the key we're hunting for
+const FIND_MATCH_THRESH = 0.52; // score above which a blob counts as a match
+
+// Launch Find for a given stored key (called from My Keys).
+async function startFindInPile(id) {
+  findTargetKey = await getKey(id);
+  if (!findTargetKey) return;
+  $("#findTitle").textContent = "Find in pile";
+  $("#findTarget").innerHTML = `Looking for: <strong>${keyLabel(findTargetKey)}</strong>${findTargetKey.category ? " · " + escapeHtml(findTargetKey.category) : ""}`;
+  // reset UI
+  $("#findResults").innerHTML = "";
+  $("#findOverlay").hidden = true; $("#findOverlay").innerHTML = "";
+  $("#findPreview").hidden = true; $("#findVideo").hidden = false;
+  $("#findGuide").style.display = ""; $("#findRetryBtn").hidden = true;
+  $("#findCaptureBtn").hidden = false;
+  showView("find");
+}
+
+$("#findRetryBtn").addEventListener("click", () => {
+  $("#findResults").innerHTML = "";
+  $("#findOverlay").hidden = true; $("#findOverlay").innerHTML = "";
+  $("#findPreview").hidden = true; $("#findVideo").hidden = false;
+  $("#findGuide").style.display = ""; $("#findRetryBtn").hidden = true;
+  $("#findCaptureBtn").hidden = false;
+});
+
+$("#findCaptureBtn").addEventListener("click", async () => {
+  if (!findTargetKey) { toast("Pick a key from My Keys first."); return; }
+  const btn = $("#findCaptureBtn");
+  // grab a full (non-cropped) frame from the live camera, or file fallback
+  const full = await captureFull("find");
+  if (!full) return;
+
+  // freeze the photo as the preview
+  const prev = $("#findPreview");
+  prev.width = full.width; prev.height = full.height;
+  prev.getContext("2d").drawImage(full, 0, 0);
+  prev.hidden = false; $("#findVideo").hidden = true; $("#findGuide").style.display = "none";
+  $("#findRetryBtn").hidden = false; $("#findCaptureBtn").hidden = true;
+
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Searching…';
+  try {
+    const seg = segmentPile(full, full.width, full.height);
+    if (!seg.blobs.length) {
+      renderFindResults([], seg);
+      return;
+    }
+    // fingerprint each blob and score against the target key
+    const scored = [];
+    for (const b of seg.blobs) {
+      const fp = await fingerprint(cropBlob(seg.canvas, b), false);
+      scored.push({ blob: b, score: keyScore(fp, findTargetKey) });
+    }
+    renderFindResults(scored, seg);
+  } finally {
+    btn.disabled = false; btn.innerHTML = "📸 Capture &amp; find";
+  }
+});
+
+function renderFindResults(scored, seg) {
+  const matches = scored.filter((s) => s.score >= FIND_MATCH_THRESH)
+    .sort((a, b) => b.score - a.score);
+  // draw overlay boxes in the preview's coordinate space (viewBox 0..100)
+  const ov = $("#findOverlay");
+  ov.setAttribute("viewBox", `0 0 ${seg.W} ${seg.H}`);
+  // "meet" letterboxes exactly like the preview's object-fit: contain, so boxes line up.
+  ov.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  let svg = "";
+  scored.forEach((s) => {
+    const isMatch = s.score >= FIND_MATCH_THRESH;
+    svg += `<rect class="${isMatch ? "match" : "other"}" x="${s.blob.x}" y="${s.blob.y}" width="${s.blob.w}" height="${s.blob.h}" rx="3"/>`;
+    if (isMatch) {
+      svg += `<text x="${s.blob.x + 1}" y="${Math.max(4, s.blob.y - 1)}">${Math.round(s.score * 100)}%</text>`;
+    }
+  });
+  ov.innerHTML = svg;
+  ov.hidden = false;
+
+  const box = $("#findResults");
+  if (!matches.length) {
+    box.innerHTML = `<div class="empty">No match found in this photo.<br><span style="font-size:12px">Detected ${scored.length} key-like shape(s). Try spreading the keys apart on a plainer surface, or take a clearer photo.</span></div>`;
+    return;
+  }
+  const word = matches.length === 1 ? "match" : "matches";
+  box.innerHTML = `<h3>${matches.length} ${word} highlighted</h3>` +
+    `<p class="hint">Green boxes mark where <strong>${keyLabel(findTargetKey)}</strong> appears${matches.length > 1 ? " (duplicates found)" : ""}. Other detected keys are outlined faintly.</p>`;
+}
+
+/* ---------- custom inline date picker (commits on tap) ---------- */
+const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+let dpYear, dpMonth; // currently displayed month
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+// Parse "YYYY-MM-DD" into parts without timezone drift.
+function parseISO(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || "");
+  return m ? { y: +m[1], mo: +m[2] - 1, d: +m[3] } : null;
+}
+function setDate(iso) {
+  $("#addDate").value = iso || "";
+  const val = $("#addDateValue");
+  if (iso) {
+    const p = parseISO(iso);
+    val.innerHTML = `<span>${MONTHS[p.mo]} ${p.d}, ${p.y}</span><button type="button" class="clear" id="dpClear">clear</button>`;
+    $("#dpClear").onclick = () => { setDate(""); renderDatePicker(); };
+    dpYear = p.y; dpMonth = p.mo;
+  } else {
+    val.innerHTML = `<span style="color:var(--muted)">No date set</span>`;
+  }
+  renderDatePicker();
+}
+function renderDatePicker() {
+  const host = $("#addDatePick");
+  if (!host) return;
+  if (dpYear == null) {
+    const p = parseISO($("#addDate").value);
+    const now = new Date();
+    dpYear = p ? p.y : now.getFullYear();
+    dpMonth = p ? p.mo : now.getMonth();
+  }
+  const sel = parseISO($("#addDate").value);
+  const first = new Date(Date.UTC(dpYear, dpMonth, 1)).getUTCDay();
+  const days = new Date(Date.UTC(dpYear, dpMonth + 1, 0)).getUTCDate();
+  let cells = "";
+  for (let i = 0; i < first; i++) cells += `<div class="dp-day empty"></div>`;
+  for (let d = 1; d <= days; d++) {
+    const isSel = sel && sel.y === dpYear && sel.mo === dpMonth && sel.d === d;
+    cells += `<div class="dp-day${isSel ? " sel" : ""}" data-d="${d}">${d}</div>`;
+  }
+  host.innerHTML = `
+    <div class="dp-head">
+      <button type="button" id="dpPrev">‹</button>
+      <span class="dp-title">${MONTHS[dpMonth]} ${dpYear}</span>
+      <button type="button" id="dpNext">›</button>
+    </div>
+    <div class="dp-grid">${DOW.map((d) => `<div class="dp-dow">${d}</div>`).join("")}${cells}</div>`;
+  $("#dpPrev").onclick = () => { dpMonth--; if (dpMonth < 0) { dpMonth = 11; dpYear--; } renderDatePicker(); };
+  $("#dpNext").onclick = () => { dpMonth++; if (dpMonth > 11) { dpMonth = 0; dpYear++; } renderDatePicker(); };
+  $$("#addDatePick .dp-day[data-d]").forEach((el) =>
+    el.addEventListener("click", () => setDate(`${dpYear}-${pad2(dpMonth + 1)}-${pad2(+el.dataset.d)}`)));
+}
+
+/* ---------- category autocomplete ---------- */
+async function refreshCategoryList() {
+  const all = await getAllKeys();
+  const cats = distinctCategories(all);
+  $("#categoryList").innerHTML = cats.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("");
+}
+
+/* ---------- ADD / EDIT flow ---------- */
+let stagedPhotos = []; // {canvas, thumb, fp}
+let editingId = null;
+
+$("#addCaptureBtn").addEventListener("click", async () => {
+  const btn = $("#addCaptureBtn");
+  const canvas = await capture("add");
+  if (!canvas) return;
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Processing…';
+  try {
+    const fp = await fingerprint(canvas);
+    stagedPhotos.push({ canvas, thumb: canvasToThumb(canvas), fp });
+    renderStagedThumbs();
+  } finally {
+    btn.disabled = false; btn.innerHTML = "📸 Add photo";
+  }
+});
+
+function renderStagedThumbs() {
+  const box = $("#addThumbs");
+  box.innerHTML = stagedPhotos.map((p, i) =>
+    `<div class="thumb" style="background-image:url('${p.thumb}');background-size:cover">
+       <button class="thumb-del" data-i="${i}">×</button>
+     </div>`).join("");
+  $$("#addThumbs .thumb-del").forEach((b) =>
+    b.addEventListener("click", () => { stagedPhotos.splice(+b.dataset.i, 1); renderStagedThumbs(); }));
+}
+
+$("#addSaveBtn").addEventListener("click", async () => {
+  const forVal = $("#addFor").value.trim();
+  // "For" may be left blank — the key lands on the "to investigate" list.
+  if (!stagedPhotos.length && !editingId) { toast("Add at least one photo."); return; }
+
+  let key;
+  if (editingId) {
+    key = await getKey(editingId) || {};
+  } else {
+    key = { id: uid(), createdAt: new Date().toISOString(), fingerprints: [], thumbnails: [] };
+  }
+  key.for = forVal || null;
+  key.category = $("#addCategory").value.trim() || null;
+  key.date = $("#addDate").value || null;
+  key.status = $("#addStatus").value;
+  key.notes = $("#addNotes").value.trim() || null;
+  key.updatedAt = new Date().toISOString();
+  key.createdAt = key.createdAt || key.updatedAt;
+  // append newly staged photos
+  key.fingerprints = key.fingerprints || [];
+  key.thumbnails = key.thumbnails || [];
+  for (const p of stagedPhotos) {
+    key.fingerprints.push(p.fp);
+    key.thumbnails.push(p.thumb);
+  }
+  await putKey(key);
+  toast(editingId ? "✓ Updated" : "✓ Saved");
+  resetAddForm();
+  showView("keys");
+});
+
+$("#addCancelBtn").addEventListener("click", () => { resetAddForm(); showView("keys"); });
+
+function resetAddForm() {
+  editingId = null;
+  stagedPhotos = [];
+  pendingCapture = null;
+  $("#addFor").value = ""; $("#addCategory").value = ""; $("#addNotes").value = "";
+  setDate("");
+  $("#addStatus").value = "active";
+  $("#addTitle").textContent = "Add a key";
+  $("#addCancelBtn").hidden = true;
+  renderStagedThumbs();
+}
+
+async function editKey(id) {
+  const key = await getKey(id);
+  if (!key) return;
+  editingId = id;
+  stagedPhotos = [];
+  $("#addTitle").textContent = "Edit key";
+  $("#addFor").value = key.for || "";
+  $("#addCategory").value = key.category || "";
+  setDate(key.date || "");
+  $("#addStatus").value = key.status || "active";
+  $("#addNotes").value = key.notes || "";
+  $("#addCancelBtn").hidden = false;
+  await refreshCategoryList();
+  renderStagedThumbs();
+  // show existing thumbs (read-only reference)
+  const box = $("#addThumbs");
+  box.innerHTML = (key.thumbnails || []).map((t) =>
+    `<div class="thumb" style="background-image:url('${t}');background-size:cover;opacity:.85"></div>`).join("")
+    + '<div class="hint" style="width:100%;font-size:12px;margin-top:4px;color:var(--muted)">Existing photos (add more above to improve matching)</div>';
+  showView("add");
+}
+
+/* ---------- MY KEYS ---------- */
+// Filter is one of: "active", "obsolete" (Decommissioned), "all", or "cat:<name>".
+let keysFilter = "active";
+
+// Collect distinct, non-empty categories from stored keys.
+function distinctCategories(keys) {
+  const set = new Set();
+  keys.forEach((k) => { if (k.category) set.add(k.category); });
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+const isDecom = (k) => k.status === "obsolete";
+
+async function renderFilterChips(all) {
+  const inService = all.filter((k) => !isDecom(k));      // decommissioned excluded by default
+  const cats = distinctCategories(inService);
+  const count = (fn) => all.filter(fn).length;
+  const unidentified = inService.filter(isUnidentified).length;
+  const chips = [
+    { f: "active", label: "Active", n: inService.length },
+    // "To investigate" = in-service keys with no "For" yet.
+    ...(unidentified ? [{ f: "unidentified", label: "To investigate", n: unidentified }] : []),
+    // Category chips count only in-service keys (decommissioned are hidden unless explicitly requested).
+    ...cats.map((c) => ({ f: "cat:" + c, label: c, n: inService.filter((k) => k.category === c).length })),
+    { f: "obsolete", label: "Decommissioned", n: count(isDecom) },
+    { f: "all", label: "All", n: all.length },
+  ];
+  const box = $("#keysFilters");
+  box.innerHTML = chips.map((c) =>
+    `<div class="chip ${keysFilter === c.f ? "active" : ""}" data-filter="${escapeHtml(c.f)}">${escapeHtml(c.label)}<span class="count">${c.n}</span></div>`
+  ).join("");
+  $$("#keysFilters .chip").forEach((el) =>
+    el.addEventListener("click", () => { keysFilter = el.dataset.filter; renderKeys(); }));
+}
+
+function matchesFilter(k) {
+  // "obsolete" and "all" are the only filters that reveal decommissioned keys.
+  if (keysFilter === "obsolete") return isDecom(k);
+  if (keysFilter === "all") return true;
+  if (isDecom(k)) return false; // hidden from Active/category/unidentified by default
+  if (keysFilter === "active") return true;
+  if (keysFilter === "unidentified") return isUnidentified(k);
+  if (keysFilter.startsWith("cat:")) return k.category === keysFilter.slice(4);
+  return true;
+}
+
+async function renderKeys() {
+  const all = await getAllKeys();
+  await renderFilterChips(all);
+  const list = all
+    .filter(matchesFilter)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const box = $("#keysList");
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">No keys here yet.</div>';
+    return;
+  }
+  box.innerHTML = list.map((k) => `
+    <div class="key-item">
+      <img class="thumb" src="${k.thumbnails?.[0] || ""}" alt="" />
+      <div class="meta">
+        <div class="name">${keyLabel(k)}</div>
+        <div class="sub">${isUnidentified(k) ? "🔎 needs identifying · " : ""}${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
+      </div>
+      <span class="badge ${k.status || "active"}">${k.status === "obsolete" ? "decommissioned" : (k.status || "active")}</span>
+    </div>
+    <div style="padding:0 12px 6px" data-id="${k.id}">
+      <button class="btn find-btn" ${(k.fingerprints || []).length ? "" : "disabled"}>🔦 Find in pile</button>
+    </div>
+    <div class="row" style="padding:0 12px 12px" data-id="${k.id}">
+      <button class="btn secondary edit-btn">Edit</button>
+      <button class="btn secondary toggle-btn">${(k.status === "obsolete") ? "Reactivate" : "Decommission"}</button>
+      <button class="btn danger del-btn">Delete</button>
+    </div>
+  `).join("");
+  $$("#keysList .find-btn").forEach((b) =>
+    b.addEventListener("click", () => startFindInPile(b.closest("[data-id]").dataset.id)));
+  $$("#keysList .edit-btn").forEach((b) =>
+    b.addEventListener("click", () => editKey(b.closest("[data-id]").dataset.id)));
+  $$("#keysList .toggle-btn").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const id = b.closest("[data-id]").dataset.id;
+      const k = await getKey(id); if (!k) return;
+      k.status = (k.status === "obsolete") ? "active" : "obsolete";
+      k.updatedAt = new Date().toISOString();
+      await putKey(k); renderKeys();
+      toast(k.status === "obsolete" ? "Decommissioned" : "Reactivated");
+    }));
+  $$("#keysList .del-btn").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const id = b.closest("[data-id]").dataset.id;
+      if (!confirm("Delete this key permanently?")) return;
+      await deleteKey(id); renderKeys(); toast("Deleted");
+    }));
+}
+
+/* ---------- SYNC ---------- */
+$("#exportBtn").addEventListener("click", async () => {
+  const keys = await getAllKeys();
+  const payload = { app: "keybuddy", version: 1, exportedAt: new Date().toISOString(), keys };
+  const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+  const stamp = new Date().toISOString().slice(0, 10);
+  const fname = `keybuddy-${stamp}.json`;
+  const file = new File([blob], fname, { type: "application/json" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: "Key Buddy export" }); return; } catch (_) {}
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = fname; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`Exported ${keys.length} key(s)`);
+});
+
+// Export a labeled training dataset: one record per photo with its label,
+// category, status, and the stored image (data URL). Useful for training a
+// custom key model later. Images are the stored thumbnails.
+$("#exportTrainBtn").addEventListener("click", async () => {
+  const keys = await getAllKeys();
+  const samples = [];
+  keys.forEach((k) => {
+    (k.thumbnails || []).forEach((img, i) => {
+      samples.push({
+        keyId: k.id,
+        label: k.for || null,
+        category: k.category || null,
+        status: k.status || "active",
+        image: img,
+      });
+    });
+  });
+  if (!samples.length) { toast("No labeled photos to export yet."); return; }
+  const payload = {
+    app: "keybuddy-training", version: 1,
+    exportedAt: new Date().toISOString(),
+    note: "Each sample: {label, category, status, image(dataURL)}. Images are stored thumbnails.",
+    count: samples.length, samples,
+  };
+  const stamp = new Date().toISOString().slice(0, 10);
+  downloadJSON(payload, `keybuddy-training-${stamp}.json`);
+  toast(`Exported ${samples.length} labeled photo(s)`);
+});
+
+// Shared: share-or-download a JSON payload as a file.
+async function downloadJSON(payload, fname) {
+  const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+  const file = new File([blob], fname, { type: "application/json" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: fname }); return; } catch (_) {}
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = fname; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+$("#importBtn").addEventListener("click", () => $("#importInput").click());
+$("#importInput").addEventListener("change", async () => {
+  const f = $("#importInput").files[0];
+  if (!f) return;
+  try {
+    const data = JSON.parse(await f.text());
+    if (data.app !== "keybuddy" || !Array.isArray(data.keys)) throw new Error("bad file");
+    let added = 0, updated = 0;
+    for (const incoming of data.keys) {
+      if (!incoming.id) continue;
+      const existing = await getKey(incoming.id);
+      if (!existing) { await putKey(incoming); added++; }
+      else {
+        // newest updatedAt wins
+        const a = existing.updatedAt || existing.createdAt || "";
+        const b = incoming.updatedAt || incoming.createdAt || "";
+        if (b > a) { await putKey(incoming); updated++; }
+      }
+    }
+    toast(`Imported: ${added} new, ${updated} updated`);
+    renderStats();
+  } catch (e) {
+    console.error(e);
+    toast("Import failed — not a valid Key Buddy file.");
+  }
+  $("#importInput").value = "";
+});
+
+$("#resetBtn").addEventListener("click", async () => {
+  if (!confirm("Delete ALL keys on this device? This cannot be undone.")) return;
+  const all = await getAllKeys();
+  for (const k of all) await deleteKey(k.id);
+  toast("All data cleared");
+  renderStats();
+});
+
+async function renderStats() {
+  const all = await getAllKeys();
+  const active = all.filter((k) => (k.status || "active") === "active").length;
+  $("#statsLine").textContent = `${all.length} key(s) on this device · ${active} active · ${all.length - active} decommissioned`;
+}
+
+/* ---------- util ---------- */
+const isUnidentified = (k) => !k.for || !String(k.for).trim();
+// Human label for a key, escaped for HTML. Unidentified keys get a placeholder.
+function keyLabel(k) {
+  return isUnidentified(k)
+    ? '<span style="font-style:italic;color:var(--muted)">Unidentified key</span>'
+    : escapeHtml(k.for);
+}
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ---------- service worker (offline) ---------- */
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}
+
+/* ---------- boot ---------- */
+setDate("");            // initialize the date picker to "no date"
+// Default to My Keys (not Identify) so the camera/scan loop don't start on launch — saves battery.
+showView("keys");
+loadModel();

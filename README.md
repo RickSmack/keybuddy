@@ -14,7 +14,8 @@ Everything is stored **only on your device**. There is no server, no account, an
 Key Buddy does **visual similarity matching**, not true key decoding. It captures a photo,
 computes a fingerprint from it — a MobileNet image embedding plus a lightweight silhouette /
 "bitting profile" shape descriptor and a perceptual hash — and ranks your stored keys by
-similarity.
+similarity. Before fingerprinting, OpenCV finds the key's outline and **deskews/tightens the
+crop** so lighting and angle matter a little less.
 
 Because two similar keys (say, two house keys) can look almost identical, Key Buddy shows you
 the **top few candidates and asks you to confirm** rather than guessing a single answer. For
@@ -24,6 +25,19 @@ best results:
 - Fill the on-screen dashed box with the key.
 - Enroll each key with **2–3 photos** from slightly different angles — every confirmed match
   also strengthens that key's fingerprint over time.
+
+### Files & structure
+All recognition assets are **self-hosted** (nothing loads from a third-party CDN):
+
+```
+index.html            markup
+styles.css            styles
+app.js                all app logic
+sw.js                 service worker (offline cache)
+vendor/tf.min.js      TensorFlow.js
+vendor/opencv.js      OpenCV.js (deskew/crop preprocessing)
+vendor/mobilenet/     self-hosted MobileNet v1 (model.json + weight shards)
+```
 
 ---
 
@@ -106,9 +120,15 @@ is stored only in the browser's local storage on that phone — never uploaded t
 and Key Buddy has no account or cloud. Because storage is per-device, anyone who opens the
 Key Buddy link simply starts with their own empty inventory; your data is never part of the
 app itself. Data leaves a device only through an export file that *you* choose to share
-(see Sync). The app makes no network calls except to load its image-recognition libraries
-once, which are then cached for offline use. The **Sync** tab includes a **Delete all my
-data** button to permanently wipe the current device.
+(see Sync). **All code and recognition assets are served from Key Buddy's own origin — there
+are no third-party requests.** The **Sync** tab includes a **Delete all my data** button to
+permanently wipe the current device.
+
+### Training data (for future accuracy)
+Every key you enroll is a labeled example (photos + your "For" label). The **Sync → Export
+training dataset** button packages these as a JSON file you can use later to train a custom,
+key-specific recognition model — which is the path to substantially better accuracy than the
+current general-purpose model. It stays on your device unless you choose to share it.
 
 ---
 
@@ -116,12 +136,13 @@ data** button to permanently wipe the current device.
 
 Live camera preview requires HTTPS (a "secure context"). The easiest free host is GitHub Pages:
 
-1. Create a repository and add `index.html` and `sw.js` (and this `README.md`).
+1. Create a repository and add all files, **including the `vendor/` folder** (the ML libraries
+   and model weights live there and are required).
 2. In the repo: **Settings → Pages → Build and deployment → Source: Deploy from a branch**,
    pick your branch and the `/ (root)` folder, and save.
 3. Open the published `https://<you>.github.io/<repo>/` URL on your phone.
-4. On first load (while online) the ML libraries download and are cached by the service worker;
-   afterward the app works **offline**.
+4. On first load (while online) the vendored assets (~28 MB, mostly the model + OpenCV) are
+   fetched and cached by the service worker; afterward the app works **offline**.
 
 > Tip: On iPhone/Android, use your browser's **"Add to Home Screen"** to launch it like an app.
 
@@ -137,16 +158,3 @@ python -m http.server 8000
 For testing on a phone against your dev machine you'll need HTTPS (e.g. a tunneling tool) since
 plain `http://<lan-ip>` is not a secure context.
 
----
-
-## Privacy
-
-- Photos, fingerprints, and labels never leave your device except through the export file **you**
-  choose to share.
-- No analytics, no network calls except loading the ML libraries (once, then cached).
-
-## Files
-
-- `index.html` — the entire app (UI + logic, inline).
-- `sw.js` — service worker for offline caching.
-- `README.md` — this file.

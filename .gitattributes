@@ -1,0 +1,3 @@
+# Keep vendored library and model files byte-exact (no line-ending conversion).
+vendor/** -text
+*.min.js -text
