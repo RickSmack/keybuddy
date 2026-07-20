@@ -599,6 +599,8 @@ let scanStartedAt = 0;      // when the current scanning run began
 let lastMotionAt = 0;       // last time motion was detected
 let motionPrev = null;      // previous downscaled frame for motion diff
 let smoothScores = {};      // keyId -> smoothed score (EMA across frames)
+let idShowCount = 3;        // how many ranked candidates to show (grows via "Show more")
+const ID_SHOW_STEP = 3;     // how many more to reveal per "Show more" tap
 const ID_INTERVAL = 1200;   // ms between inference attempts
 const MOTION_THRESH = 8;    // mean per-pixel gray delta counted as "motion"
 const SCORE_EMA = 0.5;      // smoothing weight for new frames (0..1; lower = steadier)
@@ -621,6 +623,7 @@ function startIdLoop() {
   if (idLoopActive) return;
   idLoopActive = true;
   smoothScores = {};          // start smoothing fresh each scan session
+  idShowCount = 3;            // collapse the list back to top-3 for a new scan
   const now = performance.now();
   scanStartedAt = now;
   lastMotionAt = now;
@@ -717,7 +720,7 @@ async function idTick() {
     });
     Object.keys(smoothScores).forEach((id) => { if (!seen.has(id)) delete smoothScores[id]; });
     const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
-      .sort((a, b) => b.score - a.score).slice(0, 3);
+      .sort((a, b) => b.score - a.score);
     renderIdResults(ranked);
   } catch (e) {
     /* transient frame error — just try again next tick */
@@ -747,8 +750,9 @@ on("#idCaptureBtn", "click", async () => {
     const keys = await getAllKeys();
     smoothScores = {};
     keys.forEach((k) => { smoothScores[k.id] = keyScore(probe, k); });
+    idShowCount = 3;
     const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
-      .sort((a, b) => b.score - a.score).slice(0, 3);
+      .sort((a, b) => b.score - a.score);
     renderIdResults(ranked);
   } finally {
     btn.disabled = false;
@@ -769,8 +773,10 @@ function renderIdResults(ranked) {
     guide.textContent = ranked[0].score >= 0.55
       ? `Best match: ${topName} (${top}%)`
       : `Best guess ${top}% — hold steady`;
+    const total = ranked.length;
+    const shown = Math.min(idShowCount, total);
     html = "<h3>Likely matches</h3>";
-    ranked.forEach((r) => {
+    ranked.slice(0, shown).forEach((r) => {
       const pct = Math.round(r.score * 100);
       const thumb = r.key.thumbnails?.[0] || "";
       const decom = r.key.status === "obsolete";
@@ -789,6 +795,11 @@ function renderIdResults(ranked) {
         ${teachBtn}
       </div>`;
     });
+    // "Show more" when the right key isn't in the visible set.
+    if (shown < total) {
+      const more = Math.min(ID_SHOW_STEP, total - shown);
+      html += `<button class="btn secondary" id="idShowMore" style="margin-bottom:10px">None of these? Show ${more} more (${total - shown} left)</button>`;
+    }
   }
   html += `<button class="btn secondary" id="idAddNew" style="margin-top:6px">➕ None of these — add as new key</button>`;
   if (ranked.length) {
@@ -800,6 +811,11 @@ function renderIdResults(ranked) {
   // can't cause you to teach the wrong key.
   $$("#idResults .teach-btn[data-id]").forEach((el) => {
     el.addEventListener("click", (e) => { e.stopPropagation(); askTeachKey(el.dataset.id); });
+  });
+  const moreBtn = $("#idShowMore");
+  if (moreBtn) moreBtn.addEventListener("click", () => {
+    idShowCount += ID_SHOW_STEP;
+    renderIdResults(ranked); // re-render immediately with more rows
   });
   $("#idAddNew").addEventListener("click", () => beginAddFromCapture());
 }
