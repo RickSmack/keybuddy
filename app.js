@@ -849,39 +849,65 @@ async function askTeachKey(id) {
   $("#teachDlgNo").onclick = cleanup;
 }
 
-// Review a key's learned improvement photos; tap one to delete it.
+// Review a key's learned improvement photos: tap a photo to enlarge, tap × to delete.
 const learnedDlg = $("#learnedDialog");
-async function reviewLearned(id) {
-  const key = await getKey(id);
-  if (!key) return;
-  const render = () => {
-    const learned = (key.fingerprints || [])
-      .map((f, idx) => ({ f, idx }))
-      .filter((o) => o.f && o.f.source === "learn");
-    $("#learnedDlgTitle").textContent = `Improvement photos · ${key.for || "Unidentified key"}`;
-    const grid = $("#learnedGrid");
-    if (!learned.length) {
-      grid.innerHTML = '<p class="hint" style="margin:0">No improvement photos left.</p>';
-    } else {
-      grid.innerHTML = learned.map((o) =>
-        `<button class="learned-cell" data-idx="${o.idx}" title="Tap to delete">
-           <img src="${o.f.thumb || ""}" alt="" />
-           <span class="del-x">×</span>
-         </button>`).join("");
-      $$("#learnedGrid .learned-cell").forEach((cell) =>
-        cell.addEventListener("click", async () => {
-          const i = +cell.dataset.idx;
-          if (!confirm("Delete this improvement photo?")) return;
-          key.fingerprints.splice(i, 1);
-          key.updatedAt = new Date().toISOString();
-          await putKey(key);
-          toast("Improvement photo deleted");
-          render();          // refresh dialog
-          renderKeys();      // refresh underlying list counts
-        }));
-    }
+const photoDlg = $("#photoDialog");
+let learnedKey = null; // key currently open in the review dialog
+
+async function deleteLearnedAt(idx) {
+  if (!learnedKey) return;
+  if (!confirm("Delete this improvement photo?")) return;
+  learnedKey.fingerprints.splice(idx, 1);
+  learnedKey.updatedAt = new Date().toISOString();
+  await putKey(learnedKey);
+  toast("Improvement photo deleted");
+  renderLearnedGrid();   // refresh dialog
+  renderKeys();          // refresh underlying list counts
+}
+
+function renderLearnedGrid() {
+  const key = learnedKey;
+  const learned = (key.fingerprints || [])
+    .map((f, idx) => ({ f, idx }))
+    .filter((o) => o.f && o.f.source === "learn");
+  $("#learnedDlgTitle").textContent = `Improvement photos · ${key.for || "Unidentified key"}`;
+  const grid = $("#learnedGrid");
+  if (!learned.length) {
+    grid.innerHTML = '<p class="hint" style="margin:0">No improvement photos left.</p>';
+    return;
+  }
+  grid.innerHTML = learned.map((o) => o.f.thumb
+    ? `<div class="learned-cell" data-idx="${o.idx}">
+         <img class="learned-img" src="${o.f.thumb}" alt="" data-idx="${o.idx}" />
+         <button class="del-x" data-del="${o.idx}" aria-label="delete">×</button>
+       </div>`
+    : `<div class="learned-cell no-preview" data-idx="${o.idx}">
+         <span class="np-label">no preview</span>
+         <button class="del-x" data-del="${o.idx}" aria-label="delete">×</button>
+       </div>`).join("");
+  // Tap the image → enlarge; tap × → delete.
+  $$("#learnedGrid .learned-img").forEach((img) =>
+    img.addEventListener("click", () => enlargeLearned(+img.dataset.idx)));
+  $$("#learnedGrid .del-x").forEach((b) =>
+    b.addEventListener("click", (e) => { e.stopPropagation(); deleteLearnedAt(+b.dataset.del); }));
+}
+
+function enlargeLearned(idx) {
+  const f = learnedKey && learnedKey.fingerprints[idx];
+  if (!f || !f.thumb) return;
+  $("#photoDialogImg").src = f.thumb;
+  $("#photoDialogDel").onclick = async () => {
+    photoDlg.close();
+    await deleteLearnedAt(idx);
   };
-  render();
+  $("#photoDialogClose").onclick = () => photoDlg.close();
+  photoDlg.showModal();
+}
+
+async function reviewLearned(id) {
+  learnedKey = await getKey(id);
+  if (!learnedKey) return;
+  renderLearnedGrid();
   learnedDlg.showModal();
   $("#learnedDlgClose").onclick = () => learnedDlg.close();
 }

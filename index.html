@@ -202,12 +202,21 @@
   <button class="btn secondary" id="teachDlgNo" style="margin-top:10px">Cancel</button>
 </dialog>
 
-<!-- Review / delete a key's learned improvement photos -->
+<!-- Review a key's learned improvement photos: tap to enlarge, × to delete -->
 <dialog id="learnedDialog">
   <h3 style="margin-top:0" id="learnedDlgTitle">Improvement photos</h3>
-  <p class="hint" style="margin-top:0">Tap a photo to delete it if it's a bad capture. Enrollment photos aren't shown here.</p>
+  <p class="hint" style="margin-top:0">Tap a photo to enlarge, or tap × to delete a bad capture. Enrollment photos aren't shown here.</p>
   <div id="learnedGrid" class="learned-grid"></div>
   <button class="btn secondary" id="learnedDlgClose" style="margin-top:12px">Close</button>
+</dialog>
+
+<!-- Enlarged view of a single improvement photo -->
+<dialog id="photoDialog" class="photo-dialog">
+  <img id="photoDialogImg" alt="" />
+  <div class="row" style="margin-top:12px">
+    <button class="btn danger" id="photoDialogDel">🗑️ Delete</button>
+    <button class="btn secondary" id="photoDialogClose">Close</button>
+  </div>
 </dialog>
 
 <!-- Self-hosted libraries (served from this origin; cached offline by the service worker) -->
