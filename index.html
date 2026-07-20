@@ -89,9 +89,14 @@
         <input type="text" id="addCategory" list="categoryList" placeholder="e.g. Bert's Keys" />
         <datalist id="categoryList"></datalist>
       </label>
+      <label class="field">Locations (optional)
+        <input type="text" id="addLocationInput" list="locationList" placeholder="Type a location, press Enter to add" />
+        <datalist id="locationList"></datalist>
+        <div class="chips-edit" id="addLocations"></div>
+      </label>
       <label class="field">Date (optional)
-        <div class="datepick" id="addDatePick"></div>
-        <div class="dp-value" id="addDateValue"></div>
+        <button type="button" class="dp-summary" id="addDateSummary" aria-expanded="false"></button>
+        <div class="datepick" id="addDatePick" hidden></div>
         <input type="hidden" id="addDate" />
       </label>
       <label class="field">Status

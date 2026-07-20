@@ -14,8 +14,9 @@ Everything is stored **only on your device**. There is no server, no account, an
 Key Buddy does **visual similarity matching**, not true key decoding. It captures a photo,
 computes a fingerprint from it — a MobileNet image embedding plus a lightweight silhouette /
 "bitting profile" shape descriptor and a perceptual hash — and ranks your stored keys by
-similarity. Before fingerprinting, OpenCV finds the key's outline and **deskews/tightens the
-crop** so lighting and angle matter a little less.
+similarity. Before fingerprinting, OpenCV finds the key's outline, **masks away everything
+outside it** (background, surface, and any keychain ring), and **deskews/tightens the crop** —
+so matching focuses on the key itself, not what it's sitting on or attached to.
 
 Because two similar keys (say, two house keys) can look almost identical, Key Buddy shows you
 the **top few candidates and asks you to confirm** rather than guessing a single answer. For
@@ -46,7 +47,7 @@ vendor/mobilenet/     self-hosted MobileNet v1 (model.json + weight shards)
 | Tab | What it does |
 |-----|--------------|
 | **Identify** | Point the camera at a key — matches appear live; tap one to confirm, or add as new. |
-| **Add** | Snap photos, enter what the key is **For** (optional), plus **Category**, **Date**, and status. |
+| **Add** | Snap photos, enter what the key is **For** (optional), plus **Category**, **Locations**, **Date**, and status. |
 | **My Keys** | Browse/filter your inventory; **Find in pile**, edit, **decommission**, reactivate, or delete. |
 | **Sync** | Export/import your keys, and reset all data. |
 | **Settings** | Configure auto-scan (on/off) and how it auto-pauses to save battery. |
@@ -66,6 +67,12 @@ it **auto-pauses** and shows a **Resume** button (tapping the camera also resume
 Give each key an optional **Category** — a free-form label for grouping, e.g. *"Bert's Keys"*,
 *"Mom's Keys"*, *"Barn"*. **My Keys** shows a filter chip per category (with counts). The
 category box autocompletes from categories you've already used.
+
+### Locations
+A key can have one or more **Locations** — where it's typically kept, e.g. *"Key Drawer"*,
+*"Rick's Keychain"*, *"In Truck"*. Type a location and press Enter to add it as a chip; add as
+many as apply. The field autocompletes from locations you've used before, and locations show
+under each key in **My Keys**.
 
 ### Find in pile
 On any key in **My Keys**, tap **🔦 Find in pile** to locate that key inside a photo of a

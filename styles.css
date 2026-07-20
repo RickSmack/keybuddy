@@ -163,6 +163,27 @@
   .datepick .dp-day:active { background: var(--panel); }
   .dp-value { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 13px; }
   .dp-value .clear { color: var(--bad); cursor: pointer; background: none; border: none; font-size: 12px; }
+  /* collapsed date summary (click to expand the calendar) */
+  .dp-summary {
+    display: flex; align-items: center; justify-content: space-between; width: 100%;
+    margin-top: 5px; background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 10px; padding: 11px 12px; font-size: 15px;
+    cursor: pointer; text-align: left;
+  }
+  .dp-summary::after { content: "▾"; color: var(--muted); margin-left: 8px; }
+  .dp-summary[aria-expanded="true"]::after { content: "▴"; }
+  .dp-summary .dp-clear { color: var(--bad); background: none; border: none; font-size: 12px; cursor: pointer; padding: 0 4px; }
+
+  /* editable chip list (locations) */
+  .chips-edit { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chips-edit:empty { margin-top: 0; }
+  .chips-edit .loc-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 6px 5px 11px; border-radius: 16px; font-size: 13px;
+  }
+  .chips-edit .loc-chip button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; }
+  .chips-edit .loc-chip button:hover { color: var(--bad); }
 
   .spinner { width: 18px; height: 18px; border: 2px solid rgba(0,0,0,.25); border-top-color: #201a08; border-radius: 50%; animation: spin .7s linear infinite; }
   .spinner.light { border-color: rgba(255,255,255,.25); border-top-color: #fff; }

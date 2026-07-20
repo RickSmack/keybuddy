@@ -108,12 +108,19 @@ if (typeof window !== "undefined") {
   setTimeout(() => clearInterval(cvPoll), 20000);
 }
 
-// Use OpenCV to find the dominant key contour, deskew via its min-area rect,
-// and return a tightened, upright CAP-square crop. Falls back to the plain
-// center crop if OpenCV isn't ready or no confident contour is found.
+// Neutral fill for masked-out (non-key) pixels — mid-gray so the embedding
+// treats it as "nothing" rather than a feature.
+const MASK_FILL = 128;
+
+// Use OpenCV to isolate the KEY ITSELF from background/keychain/surface:
+//   1. find the dominant key contour (largest external region)
+//   2. build a filled mask of that contour and blank everything outside it
+//   3. deskew via the contour's min-area rect and tighten the crop
+// Returns a CAP-square canvas with the key on a neutral field. Falls back to
+// the plain center crop if OpenCV isn't ready or no confident contour is found.
 function refineKeyCrop(workCanvas) {
   if (!cvReady) return workCanvas;
-  let src, gray, blur, edges, contours, hier;
+  let src, gray, blur, edges, contours, hier, mask, masked, rotated, maskRot, roi, M;
   try {
     src = cv.imread(workCanvas);
     gray = new cv.Mat();
@@ -122,7 +129,7 @@ function refineKeyCrop(workCanvas) {
     cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
     edges = new cv.Mat();
     cv.threshold(blur, edges, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-    // largest contour by area
+    // largest contour by area (drops keychain rings and background specks)
     contours = new cv.MatVector();
     hier = new cv.Mat();
     cv.findContours(edges, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
@@ -132,44 +139,59 @@ function refineKeyCrop(workCanvas) {
       if (a > bestArea) { bestArea = a; best = i; }
     }
     const frameArea = workCanvas.width * workCanvas.height;
-    // require the key to be a meaningful but not full-frame region
     if (best < 0 || bestArea < frameArea * 0.02 || bestArea > frameArea * 0.95) {
       return workCanvas;
     }
+
+    // 1) Build a filled mask of ONLY the key contour.
+    mask = cv.Mat.zeros(src.rows, src.cols, cv.CV_8UC1);
+    const white = new cv.Scalar(255);
+    cv.drawContours(mask, contours, best, white, -1); // -1 = filled
+    // slight dilation so we keep the key's own edge, not shave it
+    const k = cv.Mat.ones(3, 3, cv.CV_8U);
+    cv.dilate(mask, mask, k); k.delete();
+
+    // 2) Composite: key pixels kept, everything else set to neutral gray.
+    masked = new cv.Mat(src.rows, src.cols, cv.CV_8UC4, new cv.Scalar(MASK_FILL, MASK_FILL, MASK_FILL, 255));
+    src.copyTo(masked, mask);
+
+    // 3) Deskew via the contour's min-area rect.
     const rect = cv.minAreaRect(contours.get(best));
     let angle = rect.angle;
     let w = rect.size.width, h = rect.size.height;
-    // rotate so the key's long axis is horizontal
-    if (w < h) { [w, h] = [h, w]; angle += 90; }
-    const M = cv.getRotationMatrix2D(rect.center, angle, 1);
-    const rotated = new cv.Mat();
-    cv.warpAffine(src, rotated, M, new cv.Size(src.cols, src.rows),
-      cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 255));
+    if (w < h) { [w, h] = [h, w]; angle += 90; } // long axis horizontal
+    M = cv.getRotationMatrix2D(rect.center, angle, 1);
+    rotated = new cv.Mat();
+    cv.warpAffine(masked, rotated, M, new cv.Size(src.cols, src.rows),
+      cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(MASK_FILL, MASK_FILL, MASK_FILL, 255));
+
     // crop the upright bounding box (with small padding)
-    const padW = w * 0.10, padH = h * 0.10;
+    const padW = w * 0.08, padH = h * 0.08;
     const rw = Math.min(src.cols, Math.round(w + padW * 2));
     const rh = Math.min(src.rows, Math.round(h + padH * 2));
     const cx = Math.round(rect.center.x), cy = Math.round(rect.center.y);
     let x = Math.max(0, cx - Math.round(rw / 2));
     let y = Math.max(0, cy - Math.round(rh / 2));
     x = Math.min(x, src.cols - rw); y = Math.min(y, src.rows - rh);
-    const roi = rotated.roi(new cv.Rect(x, y, rw, rh));
-    // letterbox roi into a CAP square
+    roi = rotated.roi(new cv.Rect(x, y, rw, rh));
+
+    // letterbox roi into a CAP square on a neutral field
     const out = document.createElement("canvas");
     out.width = CAP; out.height = CAP;
     const octx = out.getContext("2d");
-    octx.fillStyle = "#000"; octx.fillRect(0, 0, CAP, CAP);
+    octx.fillStyle = `rgb(${MASK_FILL},${MASK_FILL},${MASK_FILL})`;
+    octx.fillRect(0, 0, CAP, CAP);
     const tmp = document.createElement("canvas");
     cv.imshow(tmp, roi);
     const s = Math.min(CAP / tmp.width, CAP / tmp.height);
     const dw = tmp.width * s, dh = tmp.height * s;
     octx.drawImage(tmp, (CAP - dw) / 2, (CAP - dh) / 2, dw, dh);
-    rotated.delete(); roi.delete(); M.delete();
     return out;
   } catch (e) {
     return workCanvas; // any OpenCV hiccup → safe fallback
   } finally {
-    [src, gray, blur, edges, hier].forEach((m) => { try { m && m.delete(); } catch (_) {} });
+    [src, gray, blur, edges, hier, mask, masked, rotated, maskRot, roi, M].forEach(
+      (m) => { try { m && m.delete(); } catch (_) {} });
     try { contours && contours.delete(); } catch (_) {}
   }
 }
@@ -535,7 +557,7 @@ function showView(name) {
   });
   // auto-identify loop only runs on the Identify view (and only if enabled)
   if (name === "identify") enterIdentify(); else stopIdLoop();
-  if (name === "add") { renderDatePicker(); refreshCategoryList(); }
+  if (name === "add") { refreshCategoryList(); refreshLocationList(); }
   if (name === "keys") renderKeys();
   if (name === "sync") renderStats();
   if (name === "settings") renderSettings();
@@ -871,18 +893,36 @@ function parseISO(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || "");
   return m ? { y: +m[1], mo: +m[2] - 1, d: +m[3] } : null;
 }
+function todayISO() {
+  const n = new Date();
+  return `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`;
+}
+// Set the date value; iso "" clears it. Defaults are applied by the caller.
 function setDate(iso) {
   $("#addDate").value = iso || "";
-  const val = $("#addDateValue");
-  if (iso) {
-    const p = parseISO(iso);
-    val.innerHTML = `<span>${MONTHS[p.mo]} ${p.d}, ${p.y}</span><button type="button" class="clear" id="dpClear">clear</button>`;
-    $("#dpClear").onclick = () => { setDate(""); renderDatePicker(); };
-    dpYear = p.y; dpMonth = p.mo;
-  } else {
-    val.innerHTML = `<span style="color:var(--muted)">No date set</span>`;
-  }
+  const p = parseISO(iso);
+  if (p) { dpYear = p.y; dpMonth = p.mo; }
+  updateDateSummary();
   renderDatePicker();
+}
+// The collapsed one-line summary shown until the field is clicked.
+function updateDateSummary() {
+  const btn = $("#addDateSummary");
+  if (!btn) return;
+  const p = parseISO($("#addDate").value);
+  btn.innerHTML = p
+    ? `<span>${MONTHS[p.mo]} ${p.d}, ${p.y}</span><span class="dp-clear" id="dpClear">clear</span>`
+    : `<span style="color:var(--muted)">No date set</span>`;
+  const clr = $("#dpClear");
+  if (clr) clr.onclick = (e) => { e.stopPropagation(); setDate(""); };
+}
+function toggleDatePicker(force) {
+  const host = $("#addDatePick");
+  const btn = $("#addDateSummary");
+  const open = force !== undefined ? force : host.hidden;
+  host.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) renderDatePicker();
 }
 function renderDatePicker() {
   const host = $("#addDatePick");
@@ -912,8 +952,18 @@ function renderDatePicker() {
   $("#dpPrev").onclick = () => { dpMonth--; if (dpMonth < 0) { dpMonth = 11; dpYear--; } renderDatePicker(); };
   $("#dpNext").onclick = () => { dpMonth++; if (dpMonth > 11) { dpMonth = 0; dpYear++; } renderDatePicker(); };
   $$("#addDatePick .dp-day[data-d]").forEach((el) =>
-    el.addEventListener("click", () => setDate(`${dpYear}-${pad2(dpMonth + 1)}-${pad2(+el.dataset.d)}`)));
+    el.addEventListener("click", () => {
+      setDate(`${dpYear}-${pad2(dpMonth + 1)}-${pad2(+el.dataset.d)}`);
+      toggleDatePicker(false); // collapse after picking
+    }));
 }
+// Clicking the collapsed summary opens the calendar; if no date is set yet,
+// default the selection to today so the highlighted day "looks selected".
+$("#addDateSummary").addEventListener("click", () => {
+  const willOpen = $("#addDatePick").hidden;
+  if (willOpen && !$("#addDate").value) setDate(todayISO());
+  toggleDatePicker();
+});
 
 /* ---------- category autocomplete ---------- */
 async function refreshCategoryList() {
@@ -921,6 +971,42 @@ async function refreshCategoryList() {
   const cats = distinctCategories(all);
   $("#categoryList").innerHTML = cats.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("");
 }
+
+/* ---------- locations (multi-value chips per key) ---------- */
+let stagedLocations = []; // array of location strings for the key being edited/added
+
+function distinctLocations(keys) {
+  const set = new Set();
+  keys.forEach((k) => (k.locations || []).forEach((l) => l && set.add(l)));
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+async function refreshLocationList() {
+  const all = await getAllKeys();
+  $("#locationList").innerHTML = distinctLocations(all)
+    .map((l) => `<option value="${escapeHtml(l)}"></option>`).join("");
+}
+function renderLocationChips() {
+  $("#addLocations").innerHTML = stagedLocations.map((l, i) =>
+    `<span class="loc-chip">${escapeHtml(l)}<button type="button" data-i="${i}" aria-label="remove">×</button></span>`).join("");
+  $$("#addLocations .loc-chip button").forEach((b) =>
+    b.addEventListener("click", () => { stagedLocations.splice(+b.dataset.i, 1); renderLocationChips(); }));
+}
+function addLocationFromInput() {
+  const inp = $("#addLocationInput");
+  const val = inp.value.trim();
+  if (!val) return;
+  if (!stagedLocations.some((l) => l.toLowerCase() === val.toLowerCase())) {
+    stagedLocations.push(val);
+    renderLocationChips();
+  }
+  inp.value = "";
+}
+$("#addLocationInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addLocationFromInput(); }
+});
+// Commit a location when the field loses focus or a datalist option is picked.
+$("#addLocationInput").addEventListener("change", addLocationFromInput);
+$("#addLocationInput").addEventListener("blur", addLocationFromInput);
 
 /* ---------- ADD / EDIT flow ---------- */
 let stagedPhotos = []; // {canvas, thumb, fp}
@@ -961,8 +1047,10 @@ $("#addSaveBtn").addEventListener("click", async () => {
   } else {
     key = { id: uid(), createdAt: new Date().toISOString(), fingerprints: [], thumbnails: [] };
   }
+  addLocationFromInput(); // fold any half-typed location into the list
   key.for = forVal || null;
   key.category = $("#addCategory").value.trim() || null;
+  key.locations = stagedLocations.slice();
   key.date = $("#addDate").value || null;
   key.status = $("#addStatus").value;
   key.notes = $("#addNotes").value.trim() || null;
@@ -986,9 +1074,13 @@ $("#addCancelBtn").addEventListener("click", () => { resetAddForm(); showView("k
 function resetAddForm() {
   editingId = null;
   stagedPhotos = [];
+  stagedLocations = [];
   pendingCapture = null;
   $("#addFor").value = ""; $("#addCategory").value = ""; $("#addNotes").value = "";
+  $("#addLocationInput").value = "";
+  renderLocationChips();
   setDate("");
+  toggleDatePicker(false); // start collapsed
   $("#addStatus").value = "active";
   $("#addTitle").textContent = "Add a key";
   $("#addCancelBtn").hidden = true;
@@ -1000,14 +1092,19 @@ async function editKey(id) {
   if (!key) return;
   editingId = id;
   stagedPhotos = [];
+  stagedLocations = (key.locations || []).slice();
   $("#addTitle").textContent = "Edit key";
   $("#addFor").value = key.for || "";
   $("#addCategory").value = key.category || "";
+  $("#addLocationInput").value = "";
+  renderLocationChips();
   setDate(key.date || "");
+  toggleDatePicker(false); // collapsed until clicked
   $("#addStatus").value = key.status || "active";
   $("#addNotes").value = key.notes || "";
   $("#addCancelBtn").hidden = false;
   await refreshCategoryList();
+  await refreshLocationList();
   renderStagedThumbs();
   // show existing thumbs (read-only reference)
   const box = $("#addThumbs");
@@ -1079,7 +1176,7 @@ async function renderKeys() {
       <img class="thumb" src="${k.thumbnails?.[0] || ""}" alt="" />
       <div class="meta">
         <div class="name">${keyLabel(k)}</div>
-        <div class="sub">${isUnidentified(k) ? "🔎 needs identifying · " : ""}${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
+        <div class="sub">${isUnidentified(k) ? "🔎 needs identifying · " : ""}${k.category ? "🏷️ " + escapeHtml(k.category) + " · " : ""}${(k.locations && k.locations.length) ? "📍 " + k.locations.map(escapeHtml).join(", ") + " · " : ""}${k.date ? k.date + " · " : ""}${(k.fingerprints || []).length} photo(s)${k.notes ? " · " + escapeHtml(k.notes) : ""}</div>
       </div>
       <span class="badge ${k.status || "active"}">${k.status === "obsolete" ? "decommissioned" : (k.status || "active")}</span>
     </div>
@@ -1237,6 +1334,8 @@ if ("serviceWorker" in navigator) {
 
 /* ---------- boot ---------- */
 setDate("");            // initialize the date picker to "no date"
+toggleDatePicker(false); // start collapsed
+renderLocationChips();
 // Default to My Keys (not Identify) so the camera/scan loop don't start on launch — saves battery.
 showView("keys");
 loadModel();
