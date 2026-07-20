@@ -33,7 +33,7 @@ best results:
 |-----|--------------|
 | **Identify** | Point the camera at a key — matches appear live; tap one to confirm, or add as new. |
 | **Add** | Snap photos, enter what the key is **For** (optional), plus **Category**, **Date**, and status. |
-| **My Keys** | Browse/filter your inventory by status/category; edit, **decommission**, reactivate, or delete. |
+| **My Keys** | Browse/filter your inventory; **Find in pile**, edit, **decommission**, reactivate, or delete. |
 | **Sync** | Export/import your keys, and reset all data. |
 | **Settings** | Configure auto-scan (on/off) and how it auto-pauses to save battery. |
 
@@ -52,6 +52,18 @@ it **auto-pauses** and shows a **Resume** button (tapping the camera also resume
 Give each key an optional **Category** — a free-form label for grouping, e.g. *"Bert's Keys"*,
 *"Mom's Keys"*, *"Barn"*. **My Keys** shows a filter chip per category (with counts). The
 category box autocompletes from categories you've already used.
+
+### Find in pile
+On any key in **My Keys**, tap **🔦 Find in pile** to locate that key inside a photo of a
+bunch of keys. Take a picture of the pile and Key Buddy highlights where the key appears —
+finding **none**, **one**, or **several** (if you have duplicates). Other detected keys are
+outlined faintly.
+
+**Works best when the keys are spread out on a plain, contrasting surface.** This feature
+separates keys from the background and from each other by shape; **keys that overlap or touch
+merge together and can be missed**, so lay them out with a little space between them. It's a
+best-effort visual locator, not a guarantee — spreading the keys and using a plainer
+background dramatically improves results.
 
 ### Unidentified keys ("to investigate")
 You don't have to know what a key is for when you add it — **leave the "For" field blank** and

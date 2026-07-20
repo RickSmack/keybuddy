@@ -124,6 +124,13 @@
   }
   .cam-controls { display: flex; gap: 10px; margin-top: 12px; }
 
+  /* find-in-pile: preview shows the whole photo (contain) so overlay boxes line up */
+  #findPreview { object-fit: contain !important; background: #000; }
+  .find-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .find-overlay rect.match { fill: rgba(78,201,127,.18); stroke: var(--good); stroke-width: .6; }
+  .find-overlay rect.other { fill: none; stroke: rgba(255,255,255,.35); stroke-width: .3; stroke-dasharray: 1.5 1.5; }
+  .find-overlay text { fill: #fff; font-size: 3.4px; font-weight: 700; paint-order: stroke; stroke: #12321f; stroke-width: .8px; }
+
   .thumb { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; background: var(--panel-2); flex-shrink: 0; }
   .thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
   .thumbs .thumb { width: 64px; height: 64px; position: relative; }
@@ -209,6 +216,26 @@
     <p class="hint" id="idFallbackHint" hidden>Camera unavailable — tap Capture to take/pick a photo.</p>
 
     <div id="idResults"></div>
+  </section>
+
+  <!-- FIND IN PILE -->
+  <section class="view" id="view-find">
+    <h2 id="findTitle">Find in pile</h2>
+    <p class="hint" id="findTarget"></p>
+    <div class="camera-wrap" id="findCameraWrap">
+      <video id="findVideo" playsinline muted autoplay></video>
+      <canvas class="preview" id="findPreview" hidden></canvas>
+      <svg class="find-overlay" id="findOverlay" viewBox="0 0 100 100" preserveAspectRatio="none" hidden></svg>
+      <div class="overlay" id="findGuide">
+        <div class="guide-text">Spread the keys apart on a plain surface, then capture</div>
+      </div>
+    </div>
+    <div class="cam-controls">
+      <button class="btn" id="findCaptureBtn">📸 Capture &amp; find</button>
+      <button class="btn secondary" id="findRetryBtn" hidden>↻ New photo</button>
+    </div>
+    <input type="file" accept="image/*" capture="environment" id="findFileInput" hidden />
+    <div id="findResults"></div>
   </section>
 
   <!-- ADD / EDIT -->
@@ -527,6 +554,88 @@ async function fingerprint(workCanvas) {
   return fp;
 }
 
+/* ---------- pile segmentation (Find in Pile) ---------- */
+// Analyze a full photo: threshold, label connected blobs, keep key-sized ones,
+// and return { canvas, W, H, blobs:[{x,y,w,h,area}] } at a working resolution.
+function segmentPile(src, sw, sh) {
+  const MAXW = 480; // working width; keeps CC fast on phones
+  const scale = Math.min(1, MAXW / sw);
+  const W = Math.round(sw * scale), H = Math.round(sh * scale);
+  const work = document.createElement("canvas");
+  work.width = W; work.height = H;
+  const ctx = work.getContext("2d");
+  ctx.drawImage(src, 0, 0, W, H);
+  const data = ctx.getImageData(0, 0, W, H).data;
+
+  // grayscale + Otsu threshold (reused idea from silhouette)
+  const total = W * H;
+  const gray = new Uint8Array(total);
+  const hist = new Array(256).fill(0);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const g = (data[i] * .299 + data[i+1] * .587 + data[i+2] * .114) | 0;
+    gray[p] = g; hist[g]++;
+  }
+  let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0, wB = 0, max = 0, thr = 127;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue;
+    const wF = total - wB; if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > max) { max = between; thr = t; }
+  }
+  let darkCount = 0; for (let p = 0; p < total; p++) if (gray[p] < thr) darkCount++;
+  const keyIsDark = darkCount < total / 2; // keys are the minority foreground
+  const fg = new Uint8Array(total);
+  for (let p = 0; p < total; p++) fg[p] = (keyIsDark ? gray[p] < thr : gray[p] >= thr) ? 1 : 0;
+
+  // connected components (4-neighbour flood fill via stack)
+  const labels = new Int32Array(total).fill(0);
+  const blobs = [];
+  const stack = [];
+  let next = 0;
+  for (let start = 0; start < total; start++) {
+    if (!fg[start] || labels[start]) continue;
+    next++;
+    let minX = W, minY = H, maxX = 0, maxY = 0, area = 0;
+    stack.push(start); labels[start] = next;
+    while (stack.length) {
+      const p = stack.pop();
+      const x = p % W, y = (p / W) | 0;
+      area++;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (x > 0     && fg[p-1] && !labels[p-1]) { labels[p-1] = next; stack.push(p-1); }
+      if (x < W-1   && fg[p+1] && !labels[p+1]) { labels[p+1] = next; stack.push(p+1); }
+      if (y > 0     && fg[p-W] && !labels[p-W]) { labels[p-W] = next; stack.push(p-W); }
+      if (y < H-1   && fg[p+W] && !labels[p+W]) { labels[p+W] = next; stack.push(p+W); }
+    }
+    blobs.push({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area });
+  }
+  // Keep plausibly key-sized blobs: not too tiny (noise), not the whole frame (background).
+  const minArea = total * 0.002, maxArea = total * 0.6;
+  const kept = blobs.filter((b) => b.area >= minArea && b.area <= maxArea && b.w > 6 && b.h > 6);
+  return { canvas: work, W, H, blobs: kept };
+}
+
+// Crop a blob (with padding) out of the working canvas into a CAP-square canvas.
+function cropBlob(workCanvas, b) {
+  const pad = Math.round(Math.max(b.w, b.h) * 0.12);
+  const x = Math.max(0, b.x - pad), y = Math.max(0, b.y - pad);
+  const w = Math.min(workCanvas.width - x, b.w + pad * 2);
+  const h = Math.min(workCanvas.height - y, b.h + pad * 2);
+  const c = document.createElement("canvas");
+  c.width = CAP; c.height = CAP;
+  // letterbox the blob into the square so aspect is preserved
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, CAP, CAP);
+  const s = Math.min(CAP / w, CAP / h);
+  const dw = w * s, dh = h * s;
+  ctx.drawImage(workCanvas, x, y, w, h, (CAP - dw) / 2, (CAP - dh) / 2, dw, dh);
+  return c;
+}
+
 /* ---------- similarity ---------- */
 function cosine(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
@@ -625,6 +734,39 @@ function capture(view) {
   });
 }
 
+// Capture the FULL frame (not center-cropped) as a canvas — used by Find in Pile,
+// which needs the whole scene to locate keys. Downscales very large frames.
+function captureFull(view) {
+  const drawFull = (srcW, srcH, drawFn) => {
+    const MAX = 1280;
+    const scale = Math.min(1, MAX / Math.max(srcW, srcH));
+    const c = document.createElement("canvas");
+    c.width = Math.round(srcW * scale); c.height = Math.round(srcH * scale);
+    drawFn(c.getContext("2d"), c.width, c.height);
+    return c;
+  };
+  return new Promise((resolve) => {
+    const c = cams[view];
+    if (c && !c.usesFile && c.stream && c.video.videoWidth) {
+      resolve(drawFull(c.video.videoWidth, c.video.videoHeight,
+        (ctx, w, h) => ctx.drawImage(c.video, 0, 0, w, h)));
+      return;
+    }
+    const fi = $("#" + view + "FileInput");
+    fi.value = "";
+    fi.onchange = () => {
+      const f = fi.files[0];
+      if (!f) return resolve(null);
+      const img = new Image();
+      img.onload = () => resolve(drawFull(img.naturalWidth, img.naturalHeight,
+        (ctx, w, h) => ctx.drawImage(img, 0, 0, w, h)));
+      img.onerror = () => resolve(null);
+      img.src = URL.createObjectURL(f);
+    };
+    fi.click();
+  });
+}
+
 /* ---------- settings (persisted in localStorage) ---------- */
 const SETTINGS_KEY = "keybuddy.settings";
 const DEFAULT_SETTINGS = {
@@ -666,10 +808,10 @@ $("#setTimeSecs").addEventListener("input", (e) => { settings.timeSecs = +e.targ
 function showView(name) {
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + name));
   $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
-  // camera lifecycle
-  ["id", "add"].forEach((v) => {
-    const viewOfCam = v === "id" ? "identify" : "add";
-    if (viewOfCam === name) startCamera(v); else stopCamera(v);
+  // camera lifecycle — map each camera key to the view that uses it
+  const CAM_VIEW = { id: "identify", add: "add", find: "find" };
+  Object.entries(CAM_VIEW).forEach(([camKey, viewName]) => {
+    if (viewName === name) startCamera(camKey); else stopCamera(camKey);
   });
   // auto-identify loop only runs on the Identify view (and only if enabled)
   if (name === "identify") enterIdentify(); else stopIdLoop();
@@ -909,6 +1051,95 @@ function beginAddFromCapture() {
   }
 }
 
+/* ---------- FIND IN PILE flow ---------- */
+let findTargetKey = null;   // the key we're hunting for
+const FIND_MATCH_THRESH = 0.52; // score above which a blob counts as a match
+
+// Launch Find for a given stored key (called from My Keys).
+async function startFindInPile(id) {
+  findTargetKey = await getKey(id);
+  if (!findTargetKey) return;
+  $("#findTitle").textContent = "Find in pile";
+  $("#findTarget").innerHTML = `Looking for: <strong>${keyLabel(findTargetKey)}</strong>${findTargetKey.category ? " · " + escapeHtml(findTargetKey.category) : ""}`;
+  // reset UI
+  $("#findResults").innerHTML = "";
+  $("#findOverlay").hidden = true; $("#findOverlay").innerHTML = "";
+  $("#findPreview").hidden = true; $("#findVideo").hidden = false;
+  $("#findGuide").style.display = ""; $("#findRetryBtn").hidden = true;
+  $("#findCaptureBtn").hidden = false;
+  showView("find");
+}
+
+$("#findRetryBtn").addEventListener("click", () => {
+  $("#findResults").innerHTML = "";
+  $("#findOverlay").hidden = true; $("#findOverlay").innerHTML = "";
+  $("#findPreview").hidden = true; $("#findVideo").hidden = false;
+  $("#findGuide").style.display = ""; $("#findRetryBtn").hidden = true;
+  $("#findCaptureBtn").hidden = false;
+});
+
+$("#findCaptureBtn").addEventListener("click", async () => {
+  if (!findTargetKey) { toast("Pick a key from My Keys first."); return; }
+  const btn = $("#findCaptureBtn");
+  // grab a full (non-cropped) frame from the live camera, or file fallback
+  const full = await captureFull("find");
+  if (!full) return;
+
+  // freeze the photo as the preview
+  const prev = $("#findPreview");
+  prev.width = full.width; prev.height = full.height;
+  prev.getContext("2d").drawImage(full, 0, 0);
+  prev.hidden = false; $("#findVideo").hidden = true; $("#findGuide").style.display = "none";
+  $("#findRetryBtn").hidden = false; $("#findCaptureBtn").hidden = true;
+
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Searching…';
+  try {
+    const seg = segmentPile(full, full.width, full.height);
+    if (!seg.blobs.length) {
+      renderFindResults([], seg);
+      return;
+    }
+    // fingerprint each blob and score against the target key
+    const scored = [];
+    for (const b of seg.blobs) {
+      const fp = await fingerprint(cropBlob(seg.canvas, b));
+      scored.push({ blob: b, score: keyScore(fp, findTargetKey) });
+    }
+    renderFindResults(scored, seg);
+  } finally {
+    btn.disabled = false; btn.innerHTML = "📸 Capture &amp; find";
+  }
+});
+
+function renderFindResults(scored, seg) {
+  const matches = scored.filter((s) => s.score >= FIND_MATCH_THRESH)
+    .sort((a, b) => b.score - a.score);
+  // draw overlay boxes in the preview's coordinate space (viewBox 0..100)
+  const ov = $("#findOverlay");
+  ov.setAttribute("viewBox", `0 0 ${seg.W} ${seg.H}`);
+  // "meet" letterboxes exactly like the preview's object-fit: contain, so boxes line up.
+  ov.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  let svg = "";
+  scored.forEach((s) => {
+    const isMatch = s.score >= FIND_MATCH_THRESH;
+    svg += `<rect class="${isMatch ? "match" : "other"}" x="${s.blob.x}" y="${s.blob.y}" width="${s.blob.w}" height="${s.blob.h}" rx="3"/>`;
+    if (isMatch) {
+      svg += `<text x="${s.blob.x + 1}" y="${Math.max(4, s.blob.y - 1)}">${Math.round(s.score * 100)}%</text>`;
+    }
+  });
+  ov.innerHTML = svg;
+  ov.hidden = false;
+
+  const box = $("#findResults");
+  if (!matches.length) {
+    box.innerHTML = `<div class="empty">No match found in this photo.<br><span style="font-size:12px">Detected ${scored.length} key-like shape(s). Try spreading the keys apart on a plainer surface, or take a clearer photo.</span></div>`;
+    return;
+  }
+  const word = matches.length === 1 ? "match" : "matches";
+  box.innerHTML = `<h3>${matches.length} ${word} highlighted</h3>` +
+    `<p class="hint">Green boxes mark where <strong>${keyLabel(findTargetKey)}</strong> appears${matches.length > 1 ? " (duplicates found)" : ""}. Other detected keys are outlined faintly.</p>`;
+}
+
 /* ---------- custom inline date picker (commits on tap) ---------- */
 const DOW = ["S", "M", "T", "W", "T", "F", "S"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -1132,12 +1363,17 @@ async function renderKeys() {
       </div>
       <span class="badge ${k.status || "active"}">${k.status === "obsolete" ? "decommissioned" : (k.status || "active")}</span>
     </div>
+    <div style="padding:0 12px 6px" data-id="${k.id}">
+      <button class="btn find-btn" ${(k.fingerprints || []).length ? "" : "disabled"}>🔦 Find in pile</button>
+    </div>
     <div class="row" style="padding:0 12px 12px" data-id="${k.id}">
       <button class="btn secondary edit-btn">Edit</button>
       <button class="btn secondary toggle-btn">${(k.status === "obsolete") ? "Reactivate" : "Decommission"}</button>
       <button class="btn danger del-btn">Delete</button>
     </div>
   `).join("");
+  $$("#keysList .find-btn").forEach((b) =>
+    b.addEventListener("click", () => startFindInPile(b.closest("[data-id]").dataset.id)));
   $$("#keysList .edit-btn").forEach((b) =>
     b.addEventListener("click", () => editKey(b.closest("[data-id]").dataset.id)));
   $$("#keysList .toggle-btn").forEach((b) =>
