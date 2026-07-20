@@ -964,7 +964,8 @@ function beginAddFromCapture() {
 
 /* ---------- FIND IN PILE flow ---------- */
 let findTargetKey = null;   // the key we're hunting for
-const FIND_MATCH_THRESH = 0.52; // score above which a blob counts as a match
+const FIND_MATCH_THRESH = 0.70; // absolute score a blob must clear to be a match
+const FIND_REL_MARGIN = 0.06;   // and it must be within this of the best blob (for duplicates)
 
 // Launch Find for a given stored key (called from My Keys).
 async function startFindInPile(id) {
@@ -1012,6 +1013,13 @@ on("#findCaptureBtn", "click", async () => {
       const fp = await fingerprint(cropBlob(seg.canvas, b), false);
       scored.push({ blob: b, score: keyScore(fp, findTargetKey) });
     }
+    // A blob is a match only if it clears the absolute bar AND is near the best
+    // blob's score — so a specific key + its duplicates match, but a field of
+    // mediocre look-alikes doesn't all light up green.
+    const best = scored.reduce((m, s) => Math.max(m, s.score), 0);
+    scored.forEach((s) => {
+      s.isMatch = s.score >= FIND_MATCH_THRESH && s.score >= best - FIND_REL_MARGIN;
+    });
     drawFindResult(full, seg, scored);
     renderFindSummary(scored);
   } finally {
@@ -1033,7 +1041,7 @@ function drawFindResult(full, seg, scored) {
   ctx.font = `bold ${Math.max(14, Math.round(full.width / 26))}px sans-serif`;
   ctx.textBaseline = "bottom";
   scored.forEach((s) => {
-    const isMatch = s.score >= FIND_MATCH_THRESH;
+    const isMatch = s.isMatch;
     const x = s.blob.x * sx, y = s.blob.y * sy, w = s.blob.w * sx, h = s.blob.h * sy;
     if (isMatch) {
       // bold bright bounding box + label chip
@@ -1065,7 +1073,7 @@ function drawFindResult(full, seg, scored) {
 }
 
 function renderFindSummary(scored) {
-  const matches = scored.filter((s) => s.score >= FIND_MATCH_THRESH);
+  const matches = scored.filter((s) => s.isMatch);
   const box = $("#findResults");
   if (!scored.length) {
     box.innerHTML = `<div class="empty">No key-like shapes detected.<br><span style="font-size:12px">Lay the keys on a plain, contrasting surface with space between them, then capture again.</span></div>`;

@@ -106,6 +106,9 @@
   .camera-wrap video, .camera-wrap canvas.preview, .camera-wrap img.preview {
     width: 100%; height: 100%; object-fit: cover; display: block;
   }
+  /* [hidden] must win over the display:block above (else a stopped, black video
+     stays visible on top of the result canvas). */
+  .camera-wrap [hidden] { display: none !important; }
   .overlay { position: absolute; inset: 0; pointer-events: none; }
   .overlay svg { width: 100%; height: 100%; }
   .overlay .guide-text {
@@ -113,6 +116,13 @@
     font-size: 12px; color: #fff; text-shadow: 0 1px 3px #000;
   }
   .cam-controls { display: flex; gap: 10px; margin-top: 12px; }
+
+  /* Add/Edit sticky action bar (Save/Cancel at the top) */
+  .add-topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px;
+    background: var(--bg); padding: 6px 0 10px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .add-topbar h2 { font-size: 18px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .add-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .add-actions .btn { width: auto; padding: 10px 16px; }
 
   /* find-in-pile: preview shows the whole photo (contain) so overlay boxes line up */
   /* Find-in-Pile result: the captured photo with boxes burned in; show whole image */

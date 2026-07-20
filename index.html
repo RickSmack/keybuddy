@@ -62,7 +62,13 @@
 
   <!-- ADD / EDIT -->
   <section class="view" id="view-add">
-    <h2 id="addTitle">Add a key</h2>
+    <div class="add-topbar">
+      <h2 id="addTitle" style="margin:0">Add a key</h2>
+      <div class="add-actions">
+        <button class="btn secondary" id="addCancelBtn" hidden>Cancel</button>
+        <button class="btn" id="addSaveBtn">Save</button>
+      </div>
+    </div>
     <div class="camera-wrap" id="addCameraWrap">
       <video id="addVideo" playsinline muted autoplay></video>
       <canvas class="preview" id="addPreview" hidden></canvas>
@@ -106,8 +112,6 @@
       <label class="field">Notes (optional)
         <textarea id="addNotes" rows="2" placeholder="Keyway, brand, where it hangs…"></textarea>
       </label>
-      <button class="btn" id="addSaveBtn">Save key</button>
-      <button class="btn secondary" id="addCancelBtn" style="margin-top:10px" hidden>Cancel edit</button>
     </div>
   </section>
 
