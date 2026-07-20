@@ -796,9 +796,9 @@ function renderIdResults(ranked) {
     const top = Math.round(ranked[0].score * 100);
     const topName = isUnidentified(ranked[0].key) ? "Unidentified key" : ranked[0].key.for;
     if (idFrozen) {
-      guide.textContent = `Locked on "${topName}" (${top}%) — tap the correct key, or Scan again`;
+      guide.textContent = `Locked on "${topName}" (${top}%) — or Scan again`;
     } else if (ranked[0].score >= 0.55) {
-      guide.textContent = `Best: ${topName} (${top}%) — tap it, or Lock in to hold steady`;
+      guide.textContent = `Best: ${topName} (${top}%) — Lock in to hold the list steady`;
     } else {
       guide.textContent = `Best guess ${top}% — hold steady, or Lock in`;
     }
@@ -807,6 +807,11 @@ function renderIdResults(ranked) {
       const pct = Math.round(r.score * 100);
       const thumb = r.key.thumbnails?.[0] || "";
       const decom = r.key.status === "obsolete";
+      // Opt-in learning caps at 5 *learned* snapshots (enrollment photos are unlimited).
+      const learned = (r.key.fingerprints || []).filter((f) => f && f.source === "learn").length;
+      const teachBtn = learned >= 5
+        ? `<button class="teach-btn" disabled title="5 learned views already — enough">✓ trained</button>`
+        : `<button class="teach-btn" data-id="${r.key.id}">＋ improve</button>`;
       html += `<div class="candidate" data-id="${r.key.id}">
         <img class="thumb" src="${thumb}" alt="" />
         <div style="flex:1">
@@ -814,45 +819,43 @@ function renderIdResults(ranked) {
           <div class="score-bar"><div style="width:${pct}%"></div></div>
           <div class="sub" style="font-size:12px;color:var(--muted);margin-top:4px">${pct}% match${r.key.category ? " · " + escapeHtml(r.key.category) : ""}${r.key.date ? " · " + r.key.date : ""}</div>
         </div>
+        ${teachBtn}
       </div>`;
     });
   }
   html += `<button class="btn secondary" id="idAddNew" style="margin-top:6px">➕ None of these — add as new key</button>`;
+  if (ranked.length) {
+    html += `<p class="hint" style="font-size:12px;text-align:center;margin-top:8px">Tap <strong>＋ improve</strong> on the correct key to teach Key Buddy this view (optional).</p>`;
+  }
   box.innerHTML = html;
 
-  $$("#idResults .candidate").forEach((el) => {
-    el.addEventListener("click", () => confirmMatch(el.dataset.id));
+  // Opt-in learning only — tapping a row does nothing destructive.
+  $$("#idResults .teach-btn[data-id]").forEach((el) => {
+    el.addEventListener("click", (e) => { e.stopPropagation(); teachKey(el.dataset.id); });
   });
   $("#idAddNew").addEventListener("click", () => beginAddFromCapture());
 }
 
 let pendingCapture = null;
-const matchDlg = $("#matchDialog");
-async function confirmMatch(id) {
+
+// Opt-in: add the current probe as an extra reference fingerprint for a key,
+// improving future matches. Explicit action, so no accidental poisoning.
+async function teachKey(id) {
   const key = await getKey(id);
   if (!key) return;
   const probe = lastProbe;
-  stopIdLoop(); // pause auto-scan while the dialog is open
-  $("#matchDlgTitle").textContent = "Is this the key?";
-  $("#matchDlgBody").innerHTML = `<strong>${keyLabel(key)}</strong>${key.category ? " · " + escapeHtml(key.category) : ""}${key.notes ? "<br>" + escapeHtml(key.notes) : ""}`;
-  matchDlg.showModal();
-  $("#matchDlgYes").onclick = async () => {
-    matchDlg.close();
-    // strengthen the key by storing this new fingerprint (cap at 5)
-    if (probe) {
-      key.fingerprints = key.fingerprints || [];
-      if (key.fingerprints.length < 5) {
-        key.fingerprints.push(probe);
-        await putKey(key);
-      }
-    }
-    toast("✓ " + (key.for || "Unidentified key"));
-    if ($("#view-identify").classList.contains("active")) startIdLoop();
-  };
-  $("#matchDlgNo").onclick = () => {
-    matchDlg.close();
-    if ($("#view-identify").classList.contains("active")) startIdLoop();
-  };
+  if (!probe) { toast("No captured image to learn from."); return; }
+  key.fingerprints = key.fingerprints || [];
+  const learned = key.fingerprints.filter((f) => f && f.source === "learn").length;
+  if (learned >= 5) { toast("Enough learned views already (5)."); return; }
+  // Tag this fingerprint as learned so it's counted separately from enrollment.
+  key.fingerprints.push({ ...probe, source: "learn" });
+  key.updatedAt = new Date().toISOString();
+  await putKey(key);
+  const newLearned = learned + 1;
+  toast(`✓ Improved: ${key.for || "Unidentified key"} (${newLearned}/5 learned)`);
+  const btn = $(`#idResults .teach-btn[data-id="${id}"]`);
+  if (btn && newLearned >= 5) { btn.textContent = "✓ trained"; btn.disabled = true; }
 }
 
 function beginAddFromCapture() {
