@@ -1,7 +1,7 @@
 /* Key Buddy service worker — everything is self-hosted (same origin) now.
    Caches the app shell and the vendored ML assets so the tool works offline
    after the first successful online load. */
-const CACHE = "keybuddy-v3";
+const CACHE = "keybuddy-v4";
 
 // App shell — cached up front on install. OpenCV.js is intentionally NOT here:
 // it's lazy-loaded on first use and then cached by the /vendor/ fetch rule.
@@ -56,14 +56,21 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // App shell & everything else: stale-while-revalidate.
+  // App shell (index.html, styles.css, app.js, etc.): NETWORK-FIRST.
+  // These three must always be a matched set — stale-while-revalidate could
+  // serve an old index.html with a new app.js (or vice-versa), causing missing
+  // elements and a broken boot. Network-first keeps them in sync when online
+  // and still falls back to cache when offline.
   e.respondWith(
     caches.open(CACHE).then(async (cache) => {
-      const hit = await cache.match(req);
-      const fetching = fetch(req)
-        .then((res) => { if (res && res.ok) cache.put(req, res.clone()); return res; })
-        .catch(() => hit);
-      return hit || fetching;
+      try {
+        const res = await fetch(req);
+        if (res && res.ok) cache.put(req, res.clone());
+        return res;
+      } catch (err) {
+        const hit = await cache.match(req);
+        return hit || Response.error();
+      }
     })
   );
 });

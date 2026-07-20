@@ -7,9 +7,19 @@
 /* ---------- tiny helpers ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+// Null-safe event binding: if the element is missing (e.g. a stale cached
+// index.html paired with a newer app.js), skip it instead of throwing and
+// taking down the whole app at boot.
+function on(sel, type, handler, opts) {
+  const el = $(sel);
+  if (el) el.addEventListener(type, handler, opts);
+  else console.warn("Key Buddy: missing element for listener", sel);
+  return el;
+}
 let toastTimer;
 function toast(msg) {
   const t = $("#toast");
+  if (!t) return;
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toastTimer);
@@ -558,10 +568,10 @@ function renderSettings() {
   $("#setMotionRow").style.display = (mode === "activity" || mode === "both") ? "" : "none";
   $("#setTimeRow").style.display = (mode === "time" || mode === "both") ? "" : "none";
 }
-$("#setAutoScan").addEventListener("change", (e) => { settings.autoScan = e.target.checked; saveSettings(); renderSettings(); });
-$("#setPauseMode").addEventListener("change", (e) => { settings.pauseMode = e.target.value; saveSettings(); renderSettings(); });
-$("#setMotionSecs").addEventListener("input", (e) => { settings.motionSecs = +e.target.value; $("#setMotionSecsVal").textContent = settings.motionSecs + "s"; saveSettings(); });
-$("#setTimeSecs").addEventListener("input", (e) => { settings.timeSecs = +e.target.value; $("#setTimeSecsVal").textContent = settings.timeSecs + "s"; saveSettings(); });
+on("#setAutoScan", "change", (e) => { settings.autoScan = e.target.checked; saveSettings(); renderSettings(); });
+on("#setPauseMode", "change", (e) => { settings.pauseMode = e.target.value; saveSettings(); renderSettings(); });
+on("#setMotionSecs", "input", (e) => { settings.motionSecs = +e.target.value; $("#setMotionSecsVal").textContent = settings.motionSecs + "s"; saveSettings(); });
+on("#setTimeSecs", "input", (e) => { settings.timeSecs = +e.target.value; $("#setTimeSecsVal").textContent = settings.timeSecs + "s"; saveSettings(); });
 
 /* ---------- navigation ---------- */
 function showView(name) {
@@ -722,8 +732,8 @@ async function idTick() {
 }
 
 // Resume scanning after an auto-pause (button or tapping the camera view).
-$("#idResumeBtn").addEventListener("click", startIdLoop);
-$("#idCameraWrap").addEventListener("click", () => {
+on("#idResumeBtn", "click", startIdLoop);
+on("#idCameraWrap", "click", () => {
   const c = cams.id;
   if (settings.autoScan && !idLoopActive && c && !c.usesFile) startIdLoop();
 });
@@ -732,7 +742,7 @@ $("#idCameraWrap").addEventListener("click", () => {
 //  - Live auto-scan: "Lock in this guess" — freeze the current ranking so it
 //    stops re-ordering while you verify. Retry button resumes scanning.
 //  - File fallback (no live camera): capture a photo and identify once.
-$("#idCaptureBtn").addEventListener("click", async () => {
+on("#idCaptureBtn", "click", async () => {
   const c = cams.id;
   const liveScanning = idLoopActive && c && !c.usesFile;
   if (liveScanning) { freezeIdResults(); return; }
@@ -771,7 +781,7 @@ function freezeIdResults() {
 }
 
 // Retry: clear the freeze and resume live scanning.
-$("#idRetryBtn").addEventListener("click", () => {
+on("#idRetryBtn", "click", () => {
   const c = cams.id;
   $("#idRetryBtn").hidden = true;
   if (c && !c.usesFile) {
@@ -890,7 +900,7 @@ async function startFindInPile(id) {
   showView("find");
 }
 
-$("#findRetryBtn").addEventListener("click", () => {
+on("#findRetryBtn", "click", () => {
   $("#findResults").innerHTML = "";
   $("#findOverlay").hidden = true; $("#findOverlay").innerHTML = "";
   $("#findPreview").hidden = true; $("#findVideo").hidden = false;
@@ -898,7 +908,7 @@ $("#findRetryBtn").addEventListener("click", () => {
   $("#findCaptureBtn").hidden = false;
 });
 
-$("#findCaptureBtn").addEventListener("click", async () => {
+on("#findCaptureBtn", "click", async () => {
   if (!findTargetKey) { toast("Pick a key from My Keys first."); return; }
   const btn = $("#findCaptureBtn");
   // grab a full (non-cropped) frame from the live camera, or file fallback
@@ -1037,7 +1047,7 @@ function renderDatePicker() {
 }
 // Clicking the collapsed summary opens the calendar; if no date is set yet,
 // default the selection to today so the highlighted day "looks selected".
-$("#addDateSummary").addEventListener("click", () => {
+on("#addDateSummary", "click", () => {
   const willOpen = $("#addDatePick").hidden;
   if (willOpen && !$("#addDate").value) setDate(todayISO());
   toggleDatePicker();
@@ -1079,18 +1089,18 @@ function addLocationFromInput() {
   }
   inp.value = "";
 }
-$("#addLocationInput").addEventListener("keydown", (e) => {
+on("#addLocationInput", "keydown", (e) => {
   if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addLocationFromInput(); }
 });
 // Commit a location when the field loses focus or a datalist option is picked.
-$("#addLocationInput").addEventListener("change", addLocationFromInput);
-$("#addLocationInput").addEventListener("blur", addLocationFromInput);
+on("#addLocationInput", "change", addLocationFromInput);
+on("#addLocationInput", "blur", addLocationFromInput);
 
 /* ---------- ADD / EDIT flow ---------- */
 let stagedPhotos = []; // {canvas, thumb, fp}
 let editingId = null;
 
-$("#addCaptureBtn").addEventListener("click", async () => {
+on("#addCaptureBtn", "click", async () => {
   const btn = $("#addCaptureBtn");
   const canvas = await capture("add");
   if (!canvas) return;
@@ -1114,7 +1124,7 @@ function renderStagedThumbs() {
     b.addEventListener("click", () => { stagedPhotos.splice(+b.dataset.i, 1); renderStagedThumbs(); }));
 }
 
-$("#addSaveBtn").addEventListener("click", async () => {
+on("#addSaveBtn", "click", async () => {
   const forVal = $("#addFor").value.trim();
   // "For" may be left blank — the key lands on the "to investigate" list.
   if (!stagedPhotos.length && !editingId) { toast("Add at least one photo."); return; }
@@ -1147,7 +1157,7 @@ $("#addSaveBtn").addEventListener("click", async () => {
   showView("keys");
 });
 
-$("#addCancelBtn").addEventListener("click", () => { resetAddForm(); showView("keys"); });
+on("#addCancelBtn", "click", () => { resetAddForm(); showView("keys"); });
 
 function resetAddForm() {
   editingId = null;
@@ -1289,7 +1299,7 @@ async function renderKeys() {
 }
 
 /* ---------- SYNC ---------- */
-$("#exportBtn").addEventListener("click", async () => {
+on("#exportBtn", "click", async () => {
   const keys = await getAllKeys();
   const payload = { app: "keybuddy", version: 1, exportedAt: new Date().toISOString(), keys };
   const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
@@ -1309,7 +1319,7 @@ $("#exportBtn").addEventListener("click", async () => {
 // Export a labeled training dataset: one record per photo with its label,
 // category, status, and the stored image (data URL). Useful for training a
 // custom key model later. Images are the stored thumbnails.
-$("#exportTrainBtn").addEventListener("click", async () => {
+on("#exportTrainBtn", "click", async () => {
   const keys = await getAllKeys();
   const samples = [];
   keys.forEach((k) => {
@@ -1348,8 +1358,8 @@ async function downloadJSON(payload, fname) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-$("#importBtn").addEventListener("click", () => $("#importInput").click());
-$("#importInput").addEventListener("change", async () => {
+on("#importBtn", "click", () => $("#importInput").click());
+on("#importInput", "change", async () => {
   const f = $("#importInput").files[0];
   if (!f) return;
   try {
@@ -1376,7 +1386,7 @@ $("#importInput").addEventListener("change", async () => {
   $("#importInput").value = "";
 });
 
-$("#resetBtn").addEventListener("click", async () => {
+on("#resetBtn", "click", async () => {
   if (!confirm("Delete ALL keys on this device? This cannot be undone.")) return;
   const all = await getAllKeys();
   for (const k of all) await deleteKey(k.id);
@@ -1403,7 +1413,7 @@ function dataUrlToWorkCanvas(dataUrl) {
 // Rebuild every key's fingerprints FROM its stored photos. Confirmation-added
 // fingerprints have no matching photo, so they simply vanish; enrollment photos
 // are re-fingerprinted with the current pipeline.
-$("#rebuildBtn").addEventListener("click", async () => {
+on("#rebuildBtn", "click", async () => {
   const all = await getAllKeys();
   if (!all.length) { toast("No keys to rebuild."); return; }
   if (!confirm("Rebuild fingerprints for all keys from their photos? This removes stray confirmation images and cannot be undone.")) return;
@@ -1461,9 +1471,17 @@ if ("serviceWorker" in navigator) {
 }
 
 /* ---------- boot ---------- */
-setDate("");            // initialize the date picker to "no date"
-toggleDatePicker(false); // start collapsed
-renderLocationChips();
-// Default to My Keys (not Identify) so the camera/scan loop don't start on launch — saves battery.
-showView("keys");
+// Wrap boot so any unexpected error surfaces to the user instead of leaving
+// the app frozen on the static "starting…" default.
+try {
+  setDate("");            // initialize the date picker to "no date"
+  toggleDatePicker(false); // start collapsed
+  renderLocationChips();
+  // Default to My Keys (not Identify) so the camera/scan loop don't start on launch — saves battery.
+  showView("keys");
+} catch (e) {
+  console.error("Key Buddy boot error:", e);
+  const lbl = $("#modelLabel");
+  if (lbl) lbl.textContent = "load error — pull to refresh";
+}
 loadModel();
