@@ -144,6 +144,13 @@
   }
   .candidate .teach-btn:active { background: var(--panel); }
   .candidate .teach-btn[disabled] { color: var(--good); border-color: transparent; background: transparent; cursor: default; }
+  .candidate .reject-btn {
+    flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+    font-size: 14px; line-height: 1; cursor: pointer; padding: 0;
+  }
+  .candidate .reject-btn:active { background: var(--bad); color: #fff; border-color: var(--bad); }
+  .linklike { background: none; border: none; color: var(--accent); font-size: 12px; cursor: pointer; padding: 0; text-decoration: underline; }
 
   .empty { text-align: center; color: var(--muted); padding: 40px 20px; font-size: 14px; }
   .toast { position: fixed; bottom: 96px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 11px 18px; border-radius: 24px; font-size: 14px; z-index: 50; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90%; }

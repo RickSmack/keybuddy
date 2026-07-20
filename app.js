@@ -599,8 +599,8 @@ let scanStartedAt = 0;      // when the current scanning run began
 let lastMotionAt = 0;       // last time motion was detected
 let motionPrev = null;      // previous downscaled frame for motion diff
 let smoothScores = {};      // keyId -> smoothed score (EMA across frames)
-let idShowCount = 3;        // how many ranked candidates to show (grows via "Show more")
-const ID_SHOW_STEP = 3;     // how many more to reveal per "Show more" tap
+let idRejected = new Set(); // keyIds the user marked "not this one" this scan session
+const ID_TOPN = 3;          // how many candidates to show at once
 const ID_INTERVAL = 1200;   // ms between inference attempts
 const MOTION_THRESH = 8;    // mean per-pixel gray delta counted as "motion"
 const SCORE_EMA = 0.5;      // smoothing weight for new frames (0..1; lower = steadier)
@@ -623,7 +623,7 @@ function startIdLoop() {
   if (idLoopActive) return;
   idLoopActive = true;
   smoothScores = {};          // start smoothing fresh each scan session
-  idShowCount = 3;            // collapse the list back to top-3 for a new scan
+  idRejected = new Set();     // clear rejections for a new scan session
   const now = performance.now();
   scanStartedAt = now;
   lastMotionAt = now;
@@ -720,7 +720,8 @@ async function idTick() {
     });
     Object.keys(smoothScores).forEach((id) => { if (!seen.has(id)) delete smoothScores[id]; });
     const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
-      .sort((a, b) => b.score - a.score);
+      .filter((r) => !idRejected.has(r.key.id))         // drop keys marked "not this one"
+      .sort((a, b) => b.score - a.score).slice(0, ID_TOPN);
     renderIdResults(ranked);
   } catch (e) {
     /* transient frame error — just try again next tick */
@@ -750,9 +751,9 @@ on("#idCaptureBtn", "click", async () => {
     const keys = await getAllKeys();
     smoothScores = {};
     keys.forEach((k) => { smoothScores[k.id] = keyScore(probe, k); });
-    idShowCount = 3;
+    idRejected = new Set();
     const ranked = keys.map((k) => ({ key: k, score: smoothScores[k.id] }))
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => b.score - a.score).slice(0, ID_TOPN);
     renderIdResults(ranked);
   } finally {
     btn.disabled = false;
@@ -764,19 +765,26 @@ function renderIdResults(ranked) {
   const box = $("#idResults");
   const guide = $("#idGuideText");
   let html = "";
+  const rejectedNote = idRejected.size
+    ? `<p class="hint" style="font-size:12px;margin:2px 0 10px">${idRejected.size} ruled out this scan · <button class="linklike" id="idResetReject">reset</button></p>`
+    : "";
   if (!ranked.length) {
-    guide.textContent = "No keys stored yet — add one below";
-    html = '<h3>No keys stored yet</h3><p class="hint">Add this key so Key Buddy can recognize it next time.</p>';
+    // Either no keys at all, or every candidate has been ruled out.
+    if (idRejected.size) {
+      guide.textContent = "No more candidates — add as new key";
+      html = `<h3>No more matches</h3>${rejectedNote}<p class="hint">You've ruled out every stored key for this photo. Add it as a new key, or reset to see them again.</p>`;
+    } else {
+      guide.textContent = "No keys stored yet — add one below";
+      html = '<h3>No keys stored yet</h3><p class="hint">Add this key so Key Buddy can recognize it next time.</p>';
+    }
   } else {
     const top = Math.round(ranked[0].score * 100);
     const topName = isUnidentified(ranked[0].key) ? "Unidentified key" : ranked[0].key.for;
     guide.textContent = ranked[0].score >= 0.55
       ? `Best match: ${topName} (${top}%)`
       : `Best guess ${top}% — hold steady`;
-    const total = ranked.length;
-    const shown = Math.min(idShowCount, total);
-    html = "<h3>Likely matches</h3>";
-    ranked.slice(0, shown).forEach((r) => {
+    html = "<h3>Likely matches</h3>" + rejectedNote;
+    ranked.forEach((r) => {
       const pct = Math.round(r.score * 100);
       const thumb = r.key.thumbnails?.[0] || "";
       const decom = r.key.status === "obsolete";
@@ -786,6 +794,7 @@ function renderIdResults(ranked) {
         ? `<button class="teach-btn" disabled title="5 learned views already — enough">✓ trained</button>`
         : `<button class="teach-btn" data-id="${r.key.id}">＋ improve</button>`;
       html += `<div class="candidate" data-id="${r.key.id}">
+        <button class="reject-btn" data-reject="${r.key.id}" title="Not this one" aria-label="Not this one">✕</button>
         <img class="thumb" src="${thumb}" alt="" />
         <div style="flex:1">
           <div class="meta"><span class="name">${keyLabel(r.key)}</span>${decom ? ' <span class="badge obsolete">decommissioned</span>' : ""}</div>
@@ -795,15 +804,10 @@ function renderIdResults(ranked) {
         ${teachBtn}
       </div>`;
     });
-    // "Show more" when the right key isn't in the visible set.
-    if (shown < total) {
-      const more = Math.min(ID_SHOW_STEP, total - shown);
-      html += `<button class="btn secondary" id="idShowMore" style="margin-bottom:10px">None of these? Show ${more} more (${total - shown} left)</button>`;
-    }
   }
   html += `<button class="btn secondary" id="idAddNew" style="margin-top:6px">➕ None of these — add as new key</button>`;
   if (ranked.length) {
-    html += `<p class="hint" style="font-size:12px;text-align:center;margin-top:8px">Tap <strong>＋ improve</strong> on the correct key to teach Key Buddy this view (optional).</p>`;
+    html += `<p class="hint" style="font-size:12px;text-align:center;margin-top:8px">Tap <strong>＋ improve</strong> on the right key, or <strong>✕</strong> to rule one out and bring up the next best.</p>`;
   }
   box.innerHTML = html;
 
@@ -812,12 +816,29 @@ function renderIdResults(ranked) {
   $$("#idResults .teach-btn[data-id]").forEach((el) => {
     el.addEventListener("click", (e) => { e.stopPropagation(); askTeachKey(el.dataset.id); });
   });
-  const moreBtn = $("#idShowMore");
-  if (moreBtn) moreBtn.addEventListener("click", () => {
-    idShowCount += ID_SHOW_STEP;
-    renderIdResults(ranked); // re-render immediately with more rows
+  // "Not this one" — permanently exclude for this scan; next best bubbles up.
+  $$("#idResults .reject-btn[data-reject]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      idRejected.add(el.dataset.reject);
+      // Re-render immediately from current smoothed scores (don't wait for next tick).
+      rerenderFromScores();
+    });
   });
+  const resetBtn = $("#idResetReject");
+  if (resetBtn) resetBtn.addEventListener("click", () => { idRejected.clear(); rerenderFromScores(); });
   $("#idAddNew").addEventListener("click", () => beginAddFromCapture());
+}
+
+// Re-rank from the current smoothed scores (used after reject/reset so the UI
+// updates instantly rather than waiting for the next scan tick).
+async function rerenderFromScores() {
+  const keys = await getAllKeys();
+  const ranked = keys
+    .filter((k) => smoothScores[k.id] != null && !idRejected.has(k.id))
+    .map((k) => ({ key: k, score: smoothScores[k.id] }))
+    .sort((a, b) => b.score - a.score).slice(0, ID_TOPN);
+  renderIdResults(ranked);
 }
 
 let pendingCapture = null;
