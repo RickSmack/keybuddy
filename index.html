@@ -275,13 +275,10 @@
       <input type="file" accept="application/json,.json" id="importInput" hidden />
     </div>
     <div class="card">
-      <h3 style="margin-top:0">Share a blank copy</h3>
-      <p class="hint">This app stores keys only on <em>this</em> device — the app file itself is always blank. To give someone a fresh copy, just share the Key Buddy link/file with them; they'll start with an empty inventory.</p>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Danger zone</h3>
-      <p class="hint">Permanently delete every key and fingerprint stored on this device.</p>
-      <button class="btn danger" id="resetBtn">Reset all data</button>
+      <h3 style="margin-top:0">🔒 Data privacy</h3>
+      <p class="hint">Your keys are private and stay on your device. Every photo, fingerprint, label, and category is stored only in this browser's local storage on <em>this</em> phone — never uploaded to any server, and Key Buddy has no account or cloud. Your data leaves this device only through an export file that <em>you</em> choose to share (see Sync above). The app makes no network calls except to load its image-recognition libraries once, which are then cached for offline use.</p>
+      <p class="hint" style="margin-bottom:14px">Use the button below to permanently erase every key and fingerprint from this device. This cannot be undone.</p>
+      <button class="btn danger" id="resetBtn">Delete all my data</button>
     </div>
     <p class="hint" style="text-align:center" id="statsLine"></p>
   </section>

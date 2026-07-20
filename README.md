@@ -87,12 +87,16 @@ directions to converge two inventories.
 
 ---
 
-## Sharing a blank copy
+## Data privacy
 
-The app file contains **no key data** — all keys live in the browser's local database on each
-device. So sharing a blank copy is automatic: just send someone the Key Buddy **link** (or the
-files). They'll open it to an empty inventory. (An in-app **Reset all data** button is also
-provided if you ever want to wipe your own device.)
+Your keys are private and stay on your device. Every photo, fingerprint, label, and category
+is stored only in the browser's local storage on that phone — never uploaded to any server,
+and Key Buddy has no account or cloud. Because storage is per-device, anyone who opens the
+Key Buddy link simply starts with their own empty inventory; your data is never part of the
+app itself. Data leaves a device only through an export file that *you* choose to share
+(see Sync). The app makes no network calls except to load its image-recognition libraries
+once, which are then cached for offline use. The **Sync** tab includes a **Delete all my
+data** button to permanently wipe the current device.
 
 ---
 
