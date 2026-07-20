@@ -31,6 +31,11 @@ self.addEventListener("activate", (e) => {
   );
 });
 
+// Let the page ask a waiting worker to activate immediately (tap-to-reload).
+self.addEventListener("message", (e) => {
+  if (e.data === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET") return;

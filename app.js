@@ -1512,12 +1512,65 @@ function escapeHtml(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-/* ---------- service worker (offline) ---------- */
+/* ---------- service worker + update flow ---------- */
+let swReg = null;
+let waitingWorker = null;   // a new SW version ready to take over
+let reloadingForUpdate = false;
+
+function markUpdateAvailable(worker) {
+  waitingWorker = worker;
+  const btn = $("#updateBtn");
+  const status = $("#updateStatus");
+  if (btn) { btn.hidden = false; btn.disabled = false; btn.textContent = "🔄 Update & reload"; }
+  if (status) status.textContent = "A new version is ready.";
+  toast("Update available — see Settings");
+}
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      swReg = reg;
+      // Already a worker waiting (update downloaded on a previous visit)?
+      if (reg.waiting && navigator.serviceWorker.controller) markUpdateAvailable(reg.waiting);
+      // A new worker started installing → notify when it's installed & waiting.
+      reg.addEventListener("updatefound", () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener("statechange", () => {
+          if (nw.state === "installed" && navigator.serviceWorker.controller) {
+            markUpdateAvailable(nw);
+          }
+        });
+      });
+    }).catch(() => {});
+
+    // When the controller changes (new SW took over), reload once to load fresh assets.
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (reloadingForUpdate) { reloadingForUpdate = false; window.location.reload(); }
+    });
+
+    // Proactively check for an update each launch.
+    setTimeout(() => { if (swReg) swReg.update().catch(() => {}); }, 1500);
   });
 }
+
+// Settings button: activate the waiting worker, then reload on controllerchange.
+on("#updateBtn", "click", () => {
+  const btn = $("#updateBtn");
+  if (waitingWorker) {
+    reloadingForUpdate = true;
+    btn.disabled = true; btn.textContent = "Updating…";
+    waitingWorker.postMessage("SKIP_WAITING");
+    // Fallback: if controllerchange doesn't fire promptly, reload anyway.
+    setTimeout(() => window.location.reload(), 2500);
+  } else if (swReg) {
+    // No known update — force a check, then hard-reload from network.
+    btn.disabled = true; btn.textContent = "Checking…";
+    swReg.update().finally(() => setTimeout(() => window.location.reload(), 800));
+  } else {
+    window.location.reload();
+  }
+});
 
 /* ---------- boot ---------- */
 // Wrap boot so any unexpected error surfaces to the user instead of leaving
