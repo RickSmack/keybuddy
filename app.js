@@ -286,7 +286,7 @@ function assessQuality(fullCanvas) {
       let bestArea = 0;
       for (let i = 0; i < contours.size(); i++) bestArea = Math.max(bestArea, cv.contourArea(contours.get(i)));
       frac = bestArea / (S * S);
-      if (frac < 0.03) issues.push("no clear key / too small in frame");
+      if (frac < 0.05) issues.push("no clear key / too small in frame");
     } catch (_) {}
     finally { [src, g, edges, hier].forEach((m) => { try { m && m.delete(); } catch (_) {} });
       try { contours && contours.delete(); } catch (_) {} }
@@ -1513,6 +1513,7 @@ const ADD_AUTO_MAX = 5;        // stop auto-capture after this many so it can't 
 function startAddAuto() {
   const c = cams.add;
   if (!addAutoSessionOn || addAutoActive || !c || c.usesFile) return;
+  ensureOpenCV(); // no-op if already loading/ready — needed for the key-presence check below
   addAutoActive = true; addGoodStreak = 0; addArmed = true; addAutoPrevFrame = null;
   setAddAutoHint("Point at the key — auto-capturing when it's sharp…");
   syncAddAutoToggle();
@@ -1546,6 +1547,13 @@ async function addAutoTick() {
   if (!addAutoActive) return;
   const c = cams.add;
   if (!c || c.usesFile || !c.stream || !c.video.videoWidth || addAutoBusy || modelState === "loading") {
+    return scheduleAddAuto(ADD_AUTO_INTERVAL);
+  }
+  // Without OpenCV loaded, assessQuality can't check whether a key is even in
+  // frame (that check is OpenCV-only) — sharp + well-lit isn't enough on its
+  // own, so hold off firing until we can actually verify a key is present.
+  if (!cvReady) {
+    setAddAutoHint("Preparing key detection…");
     return scheduleAddAuto(ADD_AUTO_INTERVAL);
   }
   addAutoBusy = true;
@@ -1681,6 +1689,8 @@ function resetAddForm() {
   $("#addTitle").textContent = "Add a key";
   $("#addCancelBtn").hidden = true;
   renderStagedThumbs();
+  $("#addExistingWrap").hidden = true;
+  $("#addExistingThumbs").innerHTML = "";
   // Fresh add: auto-capture follows the user's saved default.
   addAutoSessionOn = settings.autoCapture;
   addAutoCount = 0;
@@ -1711,12 +1721,46 @@ async function editKey(id) {
   await refreshCategoryList();
   await refreshLocationList();
   renderStagedThumbs();
-  // show existing thumbs (read-only reference)
-  const box = $("#addThumbs");
-  box.innerHTML = (key.thumbnails || []).map((t) =>
-    `<div class="thumb" style="background-image:url('${t}');background-size:cover;opacity:.85"></div>`).join("")
-    + '<div class="hint" style="width:100%;font-size:12px;margin-top:4px;color:var(--muted)">Existing photos (add more above to improve matching)</div>';
+  renderExistingThumbs(key);
   showView("add");
+}
+
+// Render the already-saved photos for the key being edited, each deletable.
+// key.thumbnails is index-aligned with the BASE (non-"learn") entries of
+// key.fingerprints, in the order both arrays were pushed — "learn" fingerprints
+// (added later via the Identify "teach" flow) never get a thumbnails entry, so
+// thumbnails[i] isn't simply fingerprints[i] once any learn photo exists.
+function renderExistingThumbs(key) {
+  const wrap = $("#addExistingWrap");
+  const box = $("#addExistingThumbs");
+  const thumbs = key.thumbnails || [];
+  if (!thumbs.length) { wrap.hidden = true; box.innerHTML = ""; return; }
+  wrap.hidden = false;
+  box.innerHTML = thumbs.map((t, i) =>
+    `<div class="thumb" style="background-image:url('${t}');background-size:cover">
+       <button class="thumb-del" data-i="${i}" aria-label="delete photo">×</button>
+     </div>`).join("");
+  $$("#addExistingThumbs .thumb-del").forEach((b) =>
+    b.addEventListener("click", () => deleteExistingPhoto(+b.dataset.i)));
+}
+
+// Delete one already-saved enrollment photo (and its matching fingerprint).
+async function deleteExistingPhoto(thumbIdx) {
+  if (!editingId) return;
+  if (!confirm("Delete this photo?")) return;
+  const key = await getKey(editingId);
+  if (!key) return;
+  const fps = key.fingerprints || [];
+  const baseIdxs = [];
+  fps.forEach((f, i) => { if (!f || f.source !== "learn") baseIdxs.push(i); });
+  const fpIdx = baseIdxs[thumbIdx];
+  (key.thumbnails || []).splice(thumbIdx, 1);
+  if (fpIdx != null) fps.splice(fpIdx, 1);
+  key.updatedAt = new Date().toISOString();
+  await putKey(key);
+  toast("Photo deleted");
+  renderExistingThumbs(key);
+  renderKeys();
 }
 
 /* ---------- MY KEYS ---------- */
