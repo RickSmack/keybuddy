@@ -82,6 +82,7 @@
     <div class="cam-controls">
       <button class="btn" id="addCaptureBtn">📸 Add photo</button>
     </div>
+    <p class="hint auto-hint" id="addAutoHint" hidden></p>
     <input type="file" accept="image/*" capture="environment" id="addFileInput" hidden />
     <details class="tips"><summary>📷 Tips for sharp photos</summary>
       <ul>
@@ -190,6 +191,15 @@
         </label>
       </div>
       <p class="hint">Auto-scan uses more battery than tap-to-capture; pausing conserves it. Resume anytime by tapping the camera or the Resume button.</p>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Auto-capture (Add screen)</h3>
+      <p class="hint">When on, the Add screen automatically takes the photo once the key is sharp and well-lit and you hold steady — like a QR scanner. Move to a new angle for each shot. The manual button still works.</p>
+      <label class="toggle-row">
+        <span>Auto-capture good photos</span>
+        <input type="checkbox" id="setAutoCapture" />
+      </label>
     </div>
 
     <div class="card">

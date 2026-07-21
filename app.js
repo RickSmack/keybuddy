@@ -641,6 +641,7 @@ async function startCamera(view) {
     video.hidden = false;
     await video.play().catch(() => {});
     enableAutofocus(view);
+    if (view === "add") startAddAuto();
   } catch (e) {
     // Fallback to file capture (e.g. no permission / insecure context)
     cams[view].usesFile = true;
@@ -768,6 +769,7 @@ const DEFAULT_SETTINGS = {
   pauseMode: "both",   // "both" | "activity" | "time" | "never"
   motionSecs: 10,      // pause after this many seconds with no motion
   timeSecs: 25,        // pause after this many total seconds
+  autoCapture: true,   // Add screen: auto-take the photo when quality is good & steady
 };
 let settings = loadSettings();
 function loadSettings() {
@@ -792,7 +794,9 @@ function renderSettings() {
   const mode = settings.pauseMode;
   $("#setMotionRow").style.display = (mode === "activity" || mode === "both") ? "" : "none";
   $("#setTimeRow").style.display = (mode === "time" || mode === "both") ? "" : "none";
+  const ac = $("#setAutoCapture"); if (ac) ac.checked = settings.autoCapture;
 }
+on("#setAutoCapture", "change", (e) => { settings.autoCapture = e.target.checked; saveSettings(); });
 on("#setAutoScan", "change", (e) => { settings.autoScan = e.target.checked; saveSettings(); renderSettings(); });
 on("#setPauseMode", "change", (e) => { settings.pauseMode = e.target.value; saveSettings(); renderSettings(); });
 on("#setMotionSecs", "input", (e) => { settings.motionSecs = +e.target.value; $("#setMotionSecsVal").textContent = settings.motionSecs + "s"; saveSettings(); });
@@ -809,6 +813,7 @@ function showView(name) {
   });
   // auto-identify loop only runs on the Identify view (and only if enabled)
   if (name === "identify") enterIdentify(); else stopIdLoop();
+  if (name !== "add") stopAddAuto();
   if (name === "add") { refreshCategoryList(); refreshLocationList(); }
   if (name === "keys") renderKeys();
   if (name === "sync") renderStats();
@@ -1452,6 +1457,13 @@ on("#addLocationInput", "blur", addLocationFromInput);
 let stagedPhotos = []; // {canvas, thumb, fp}
 let editingId = null;
 
+// Fingerprint a captured canvas and add it to the staged photos.
+async function commitAddPhoto(canvas, quality) {
+  const fp = await fingerprint(canvas);
+  stagedPhotos.push({ canvas, thumb: canvasToThumb(canvas), fp, quality });
+  renderStagedThumbs();
+}
+
 on("#addCaptureBtn", "click", async () => {
   const btn = $("#addCaptureBtn");
   const canvas = await capture("add");
@@ -1463,13 +1475,96 @@ on("#addCaptureBtn", "click", async () => {
       const keep = await confirmLowQuality(q, canvasToThumb(canvas));
       if (!keep) return; // user chose to retake
     }
-    const fp = await fingerprint(canvas);
-    stagedPhotos.push({ canvas, thumb: canvasToThumb(canvas), fp, quality: q.score });
-    renderStagedThumbs();
+    await commitAddPhoto(canvas, q.score);
   } finally {
     btn.disabled = false; btn.innerHTML = "📸 Add photo";
   }
 });
+
+/* ---------- auto-capture on the Add screen (QR-style) ----------
+   Continuously score the live frame; when it's good AND holds steady for a few
+   reads, capture automatically. After a shot, wait for the user to re-frame
+   (motion) before arming again, so you naturally get varied angles. */
+let addAutoActive = false;
+let addAutoBusy = false;
+let addGoodStreak = 0;
+let addArmed = true;           // false right after a capture until re-framed
+let addAutoPrevFrame = null;   // for re-frame (motion) detection
+const ADD_AUTO_INTERVAL = 320; // ms between checks
+const ADD_GOOD_NEEDED = 3;     // consecutive good reads before firing
+
+function startAddAuto() {
+  const c = cams.add;
+  if (!settings.autoCapture || addAutoActive || !c || c.usesFile) return;
+  addAutoActive = true; addGoodStreak = 0; addArmed = true; addAutoPrevFrame = null;
+  setAddAutoHint("Point at the key — auto-capturing when it's sharp…");
+  scheduleAddAuto(500);
+}
+function stopAddAuto() { addAutoActive = false; setAddAutoHint(""); }
+function scheduleAddAuto(delay) { if (addAutoActive) setTimeout(addAutoTick, delay); }
+function setAddAutoHint(msg) {
+  const el = $("#addAutoHint");
+  if (el) { el.textContent = msg; el.hidden = !msg; }
+}
+async function addAutoTick() {
+  if (!addAutoActive) return;
+  const c = cams.add;
+  if (!c || c.usesFile || !c.stream || !c.video.videoWidth || addAutoBusy || modelState === "loading") {
+    return scheduleAddAuto(ADD_AUTO_INTERVAL);
+  }
+  addAutoBusy = true;
+  try {
+    const canvas = toWorkCanvas(c.video, c.video.videoWidth, c.video.videoHeight);
+    // Re-frame detection: after a capture, wait until the scene changes enough.
+    const moved = addFrameMoved(c.video);
+    if (!addArmed) {
+      if (moved) { addArmed = true; addGoodStreak = 0; setAddAutoHint("Point at the key — auto-capturing when it's sharp…"); }
+      else { setAddAutoHint("Move to a new angle for the next photo…"); return; }
+    }
+    const q = assessQuality(canvas);
+    if (q.ok && !moved) {
+      addGoodStreak++;
+      setAddAutoHint(`Hold steady… ${addGoodStreak}/${ADD_GOOD_NEEDED}`);
+      if (addGoodStreak >= ADD_GOOD_NEEDED) {
+        addGoodStreak = 0; addArmed = false; // disarm until re-framed
+        flashAddCapture();
+        await commitAddPhoto(canvas, q.score);
+        setAddAutoHint("✓ Captured — move to a new angle for another");
+      }
+    } else {
+      addGoodStreak = 0;
+      setAddAutoHint(q.issues && q.issues.length ? "Adjust: " + q.issues[0] : "Hold steady…");
+    }
+  } catch (_) {
+  } finally {
+    addAutoBusy = false;
+    scheduleAddAuto(ADD_AUTO_INTERVAL);
+  }
+}
+// Coarse frame-change detector (reuses the motion idea) for re-framing.
+function addFrameMoved(video) {
+  const S = 24;
+  const cv2 = document.createElement("canvas"); cv2.width = S; cv2.height = S;
+  const ctx = cv2.getContext("2d"); ctx.drawImage(video, 0, 0, S, S);
+  const d = ctx.getImageData(0, 0, S, S).data;
+  const cur = new Uint8Array(S * S);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) cur[p] = (d[i]*.299 + d[i+1]*.587 + d[i+2]*.114) | 0;
+  let moved = false;
+  if (addAutoPrevFrame) {
+    let sum = 0; for (let p = 0; p < cur.length; p++) sum += Math.abs(cur[p] - addAutoPrevFrame[p]);
+    if (sum / cur.length > 12) moved = true;
+  }
+  addAutoPrevFrame = cur;
+  return moved;
+}
+function flashAddCapture() {
+  const wrap = cams.add?.wrap;
+  if (!wrap) return;
+  const f = document.createElement("div");
+  f.className = "capture-flash";
+  wrap.appendChild(f);
+  setTimeout(() => f.remove(), 300);
+}
 
 function renderStagedThumbs() {
   const box = $("#addThumbs");
