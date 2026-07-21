@@ -63,11 +63,12 @@ function uid() {
 }
 
 /* ---------- model loading ---------- */
-// Self-hosted MobileNet v1 (1.0/224). We load the full layers model and build an
-// intermediate model that outputs the 1024-d global-average-pool embedding.
-let embedModel = null;       // tf model: image -> 1024-d embedding
+// Self-hosted MobileNet v2 (1.0/224) GRAPH model — stronger/more discriminative
+// embeddings than v1. We read the pre-logits AvgPool node (1280-d) as the
+// embedding (equivalent to the old mobilenet.infer(x, true) from early testing).
+let embedModel = null;       // tf GraphModel
 let modelState = "loading";  // loading | ready | error
-const EMBED_LAYER = "global_average_pooling2d_1";
+const EMBED_NODE = "module_apply_default/MobilenetV2/Logits/AvgPool";
 function setModelStatus(state, label) {
   modelState = state;
   const dot = $("#modelDot");
@@ -78,17 +79,14 @@ async function loadModel() {
   setModelStatus("loading", "preparing…");
   try {
     await tf.ready();
-    // The model weights are a one-time ~17 MB download (then cached offline).
-    // Show percent so the first load never looks frozen.
-    const full = await tf.loadLayersModel("vendor/mobilenet/model.json", {
+    // One-time ~14 MB download (then cached offline). Show percent.
+    embedModel = await tf.loadGraphModel("vendor/mobilenet_v2/model.json", {
       onProgress: (frac) => setModelStatus("loading", `downloading model ${Math.round(frac * 100)}%`),
     });
     setModelStatus("loading", "warming up…");
-    const embedLayer = full.getLayer(EMBED_LAYER);
-    embedModel = tf.model({ inputs: full.inputs, outputs: embedLayer.output });
     const warm = tf.zeros([1, CAP, CAP, 3]);
-    embedModel.predict(warm).dispose();
-    warm.dispose();
+    const wout = embedModel.execute(warm, EMBED_NODE);
+    wout.dispose(); warm.dispose();
     setModelStatus("ready", "ready");
     // Now that the app is interactive, warm OpenCV in the background so the
     // background-masking preprocessing is ready before the first capture.
@@ -135,9 +133,6 @@ function ensureOpenCV() {
   document.head.appendChild(s);
 }
 
-// Neutral fill for masked-out (non-key) pixels — mid-gray so the embedding
-// treats it as "nothing" rather than a feature.
-const MASK_FILL = 128;
 
 // Use OpenCV to isolate the KEY ITSELF from background/keychain/surface:
 //   1. find the dominant key contour (largest external region)
@@ -170,27 +165,17 @@ function refineKeyCrop(workCanvas) {
       return workCanvas;
     }
 
-    // 1) Build a filled mask of ONLY the key contour.
-    mask = cv.Mat.zeros(src.rows, src.cols, cv.CV_8UC1);
-    const white = new cv.Scalar(255);
-    cv.drawContours(mask, contours, best, white, -1); // -1 = filled
-    // slight dilation so we keep the key's own edge, not shave it
-    const k = cv.Mat.ones(3, 3, cv.CV_8U);
-    cv.dilate(mask, mask, k); k.delete();
-
-    // 2) Composite: key pixels kept, everything else set to neutral gray.
-    masked = new cv.Mat(src.rows, src.cols, cv.CV_8UC4, new cv.Scalar(MASK_FILL, MASK_FILL, MASK_FILL, 255));
-    src.copyTo(masked, mask);
-
-    // 3) Deskew via the contour's min-area rect.
+    // Deskew via the contour's min-area rect so the blade's long axis is
+    // horizontal (helps the cut-profile trace and normalizes pose). We do NOT
+    // mask the background to gray — a uniform gray field makes different keys
+    // look MORE alike to the embedding. A tight crop keeps background minimal.
     const rect = cv.minAreaRect(contours.get(best));
     let angle = rect.angle;
     let w = rect.size.width, h = rect.size.height;
     if (w < h) { [w, h] = [h, w]; angle += 90; } // long axis horizontal
     M = cv.getRotationMatrix2D(rect.center, angle, 1);
     rotated = new cv.Mat();
-    cv.warpAffine(masked, rotated, M, new cv.Size(src.cols, src.rows),
-      cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(MASK_FILL, MASK_FILL, MASK_FILL, 255));
+    cv.warpAffine(src, rotated, M, new cv.Size(src.cols, src.rows), cv.INTER_LINEAR);
 
     // crop the upright bounding box (with small padding)
     const padW = w * 0.08, padH = h * 0.08;
@@ -202,12 +187,11 @@ function refineKeyCrop(workCanvas) {
     x = Math.min(x, src.cols - rw); y = Math.min(y, src.rows - rh);
     roi = rotated.roi(new cv.Rect(x, y, rw, rh));
 
-    // letterbox roi into a CAP square on a neutral field
+    // letterbox roi into a CAP square
     const out = document.createElement("canvas");
     out.width = CAP; out.height = CAP;
     const octx = out.getContext("2d");
-    octx.fillStyle = `rgb(${MASK_FILL},${MASK_FILL},${MASK_FILL})`;
-    octx.fillRect(0, 0, CAP, CAP);
+    octx.fillStyle = "#000"; octx.fillRect(0, 0, CAP, CAP);
     const tmp = document.createElement("canvas");
     cv.imshow(tmp, roi);
     const s = Math.min(CAP / tmp.width, CAP / tmp.height);
@@ -217,7 +201,7 @@ function refineKeyCrop(workCanvas) {
   } catch (e) {
     return workCanvas; // any OpenCV hiccup → safe fallback
   } finally {
-    [src, gray, blur, edges, hier, mask, masked, rotated, maskRot, roi, M].forEach(
+    [src, gray, blur, edges, hier, rotated, roi, M].forEach(
       (m) => { try { m && m.delete(); } catch (_) {} });
     try { contours && contours.delete(); } catch (_) {}
   }
@@ -289,6 +273,79 @@ function shapeDescriptor(mask) {
   return { profile: prof, aspect: w / h };
 }
 
+/* ---------- scale-free cut profile (the key discriminator) ----------
+   A key's identity is its blade cutting edge. We trace that edge along the
+   blade's long axis and normalize it by the blade's own dimensions, so the
+   result is SCALE-INVARIANT (no coin/ruler needed) and captures exactly what
+   distinguishes two similar keys. As a bonus we estimate approximate bitting
+   depths using the common assumption that a key blade is ~1/4"–5/16" wide.
+   Assumes the mask is already deskewed with the long axis roughly horizontal
+   (refineKeyCrop does this). Works for cut house/padlock keys, not smooth keys. */
+const CUT_N = 40;            // samples along the blade
+const BLADE_W_MIN_IN = 0.25; // assumed blade-width range (inches) for depth estimate
+const BLADE_W_MAX_IN = 0.3125;
+const DEPTH_STEP_IN = 0.023; // ~Kwikset increment, for a rough depth count
+
+function cutProfile(mask) {
+  // bounding box of the key
+  let minX = CAP, maxX = -1, minY = CAP, maxY = -1;
+  for (let y = 0; y < CAP; y++) for (let x = 0; x < CAP; x++) {
+    if (mask[y * CAP + x]) { if (x<minX)minX=x; if (x>maxX)maxX=x; if (y<minY)minY=y; if (y>maxY)maxY=y; }
+  }
+  if (maxX < 0) return { edge: new Array(CUT_N).fill(0), depths: null, bladeH: 0 };
+  const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
+
+  // The blade is the thinner ~60% of the key opposite the bow. Determine which
+  // end is the bow (thicker column extent) and sample the blade half.
+  const colExtent = (x) => {
+    let t = -1, b = -1;
+    for (let y = 0; y < CAP; y++) if (mask[y * CAP + x]) { if (t < 0) t = y; b = y; }
+    return t < 0 ? 0 : (b - t);
+  };
+  // mean extent of left third vs right third → bow is the fatter side
+  const third = Math.round(w / 3);
+  let leftSum = 0, rightSum = 0;
+  for (let i = 0; i < third; i++) { leftSum += colExtent(minX + i); rightSum += colExtent(maxX - i); }
+  const bowOnLeft = leftSum > rightSum;
+
+  // Sample the cutting edge across the blade span (far ~75% from the bow).
+  const bladeStart = bowOnLeft ? minX + Math.round(w * 0.30) : minX;
+  const bladeEnd   = bowOnLeft ? maxX : minX + Math.round(w * 0.70);
+  const span = Math.max(1, bladeEnd - bladeStart);
+
+  // For each sample column, measure the cut edge position relative to the blade.
+  // The "cut" edge is the top edge if the key's spine is on the bottom, else bottom.
+  // Decide spine side: whichever edge is flatter (lower variance) is the spine.
+  const topEdge = [], botEdge = [];
+  for (let s = 0; s < CUT_N; s++) {
+    const x = Math.round(bladeStart + (s / (CUT_N - 1)) * span);
+    let t = -1, b = -1;
+    for (let y = 0; y < CAP; y++) if (mask[y * CAP + x]) { if (t < 0) t = y; b = y; }
+    topEdge.push(t < 0 ? minY : t);
+    botEdge.push(b < 0 ? maxY : b);
+  }
+  const variance = (a) => { const m = a.reduce((s,v)=>s+v,0)/a.length; return a.reduce((s,v)=>s+(v-m)*(v-m),0)/a.length; };
+  const spineIsTop = variance(topEdge) < variance(botEdge); // flatter edge = spine
+  // blade height (spine → cut edge) per sample, normalized by max blade height
+  const heights = topEdge.map((t, i) => spineIsTop ? (botEdge[i] - t) : (botEdge[i] - t));
+  // cut curve = distance from spine to cutting edge at each sample
+  const cut = topEdge.map((t, i) => spineIsTop ? (botEdge[i]) : (t));
+  // normalize the cut curve to 0..1 by the blade's own vertical span
+  const bladeH = Math.max(1, Math.max(...botEdge) - Math.min(...topEdge));
+  const spineLine = spineIsTop ? Math.min(...topEdge) : Math.max(...botEdge);
+  const edge = cut.map((v) => Math.abs(v - spineLine) / bladeH); // scale-free 0..1
+
+  // Bonus: approximate bitting depths using the blade-width assumption.
+  // bladeH (px) ≈ real blade width (in) → px-per-inch; depth = spine-to-cut inches.
+  const avgWidthIn = (BLADE_W_MIN_IN + BLADE_W_MAX_IN) / 2;
+  const pxPerIn = bladeH / avgWidthIn;
+  const depths = edge.map((e) => {
+    const cutInches = e * bladeH / pxPerIn;        // = e * avgWidthIn
+    return Math.round(cutInches / DEPTH_STEP_IN);   // coarse depth bucket (approx only)
+  });
+  return { edge, depths, bladeH };
+}
+
 // 8x8 average-hash perceptual hash from grayscale.
 function pHash(canvas) {
   const c = document.createElement("canvas"); c.width = 8; c.height = 8;
@@ -309,12 +366,12 @@ async function fingerprint(workCanvas, refine = true) {
   const fp = { phash: pHash(workCanvas) };
   const mask = silhouette(workCanvas);
   fp.shape = shapeDescriptor(mask);
+  fp.cut = cutProfile(mask);   // scale-free blade cutting-edge profile (key discriminator)
   if (embedModel) {
     const emb = tf.tidy(() => {
-      // MobileNet v1 expects inputs scaled to [-1, 1].
-      const t = tf.browser.fromPixels(workCanvas).toFloat()
-        .div(127.5).sub(1).expandDims(0);
-      return embedModel.predict(t).flatten();
+      // This MobileNet v2 graph model expects inputs in [0, 1].
+      const t = tf.browser.fromPixels(workCanvas).toFloat().div(255).expandDims(0);
+      return embedModel.execute(t, EMBED_NODE).flatten();
     });
     const arr = await emb.data();
     emb.dispose();
@@ -424,18 +481,29 @@ function hammingSim(a, b) {
   let same = 0; for (let i = 0; i < a.length; i++) if (a[i] === b[i]) same++;
   return same / a.length;
 }
+// Cut-profile similarity. The key may be photographed head-left or head-right,
+// so compare both the aligned and reversed curve and take the better match.
+function cutSim(a, b) {
+  if (!a?.edge || !b?.edge || a.edge.length !== b.edge.length) return 0;
+  const rev = [...b.edge].reverse();
+  return Math.max(profileSim(a.edge, b.edge), profileSim(a.edge, rev));
+}
 // Combined score of a probe fingerprint vs one stored fingerprint.
+// The cut profile is the strongest discriminator between similar keys, so it
+// carries the most weight; the embedding captures overall look (bow, finish).
 function fpScore(probe, stored) {
   const emb = probe.embedding && stored.embedding ? cosine(probe.embedding, stored.embedding) : null;
+  const cut = cutSim(probe.cut, stored.cut);
   const shp = profileSim(probe.shape?.profile, stored.shape?.profile);
-  const asp = stored.shape && probe.shape
-    ? Math.max(0, 1 - Math.abs(probe.shape.aspect - stored.shape.aspect) / 1.5) : 0;
   const ph = hammingSim(probe.phash, stored.phash);
+  const hasCut = probe.cut?.edge && stored.cut?.edge;
   if (emb === null) {
-    // no model: rely on shape + phash
-    return 0.55 * shp + 0.20 * asp + 0.25 * ph;
+    // no model: rely on cut + shape + phash
+    return hasCut ? (0.55 * cut + 0.30 * shp + 0.15 * ph)
+                  : (0.65 * shp + 0.35 * ph);
   }
-  return 0.60 * emb + 0.22 * shp + 0.08 * asp + 0.10 * ph;
+  return hasCut ? (0.45 * cut + 0.38 * emb + 0.10 * shp + 0.07 * ph)
+                : (0.70 * emb + 0.22 * shp + 0.08 * ph);
 }
 // Best score of probe vs a key (which may hold several fingerprints).
 function keyScore(probe, key) {
