@@ -240,8 +240,13 @@ function assessQuality(fullCanvas) {
     gray[p] = g; sum += g; if (g >= 250) clipped++;
   }
   const mean = sum / (S * S);
+  const clipFrac = clipped / (S * S);
   if (mean < DARK_MIN) issues.push("too dark");
-  else if (mean > BRIGHT_MAX || clipped > S * S * 0.25) issues.push("too bright / glare");
+  else if (mean > BRIGHT_MAX) issues.push("too bright / washed out");
+  // Glare = a concentrated specular hotspot (some, but not most, pixels blown
+  // out) — distinct from a uniformly bright image. This is the flash/shine case
+  // that destroys blade detail, so flag it separately.
+  else if (clipFrac > 0.015 && clipFrac < 0.35) issues.push("glare / reflection on the key");
 
   // --- sharpness: variance of Laplacian ---
   let lapVar = null;
@@ -266,9 +271,10 @@ function assessQuality(fullCanvas) {
     }
     lapVar = (gsum / (S * S)) * 12; // rough scaling into a comparable range
   }
-  if (lapVar < BLUR_MIN) issues.push("blurry / out of focus");
+  const blurry = lapVar < BLUR_MIN;
 
   // --- key present & reasonably sized (OpenCV only) ---
+  let frac = null;
   if (cvReady) {
     let src, g, edges, contours, hier;
     try {
@@ -279,12 +285,19 @@ function assessQuality(fullCanvas) {
       cv.findContours(edges, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
       let bestArea = 0;
       for (let i = 0; i < contours.size(); i++) bestArea = Math.max(bestArea, cv.contourArea(contours.get(i)));
-      const frac = bestArea / (S * S);
+      frac = bestArea / (S * S);
       if (frac < 0.03) issues.push("no clear key / too small in frame");
-      else if (frac > 0.92) issues.push("key too close / fills frame");
     } catch (_) {}
     finally { [src, g, edges, hier].forEach((m) => { try { m && m.delete(); } catch (_) {} });
       try { contours && contours.delete(); } catch (_) {} }
+  }
+
+  // Focus-distance guide: blurry + key filling the frame ≈ held inside the
+  // camera's minimum focus distance. Give the specific fix instead of just "blurry".
+  if (blurry && frac != null && frac > 0.6) {
+    issues.push("too close to focus — move back and zoom in");
+  } else if (blurry) {
+    issues.push("blurry / out of focus");
   }
 
   // score: start at 1, dock per issue; clamp
@@ -614,13 +627,20 @@ async function startCamera(view) {
   if (cams[view].stream) return; // already running
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } }, audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        // Ask for continuous autofocus + high res where supported (helps focus).
+        focusMode: "continuous",
+        width: { ideal: 1920 }, height: { ideal: 1080 },
+      },
+      audio: false,
     });
     cams[view].stream = stream;
     cams[view].usesFile = false;
     video.srcObject = stream;
     video.hidden = false;
     await video.play().catch(() => {});
+    enableAutofocus(view);
   } catch (e) {
     // Fallback to file capture (e.g. no permission / insecure context)
     cams[view].usesFile = true;
@@ -638,6 +658,52 @@ async function startCamera(view) {
 function stopCamera(view) {
   const c = cams[view];
   if (c?.stream) { c.stream.getTracks().forEach((t) => t.stop()); c.stream = null; }
+}
+
+// Request continuous autofocus on the video track where the browser allows it
+// (Android Chrome often does; iOS Safari typically doesn't — harmless if not).
+function enableAutofocus(view) {
+  const c = cams[view];
+  const track = c?.stream?.getVideoTracks?.()[0];
+  if (!track || !track.getCapabilities) return;
+  try {
+    const caps = track.getCapabilities();
+    if (caps.focusMode && caps.focusMode.includes("continuous")) {
+      track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+    }
+    c.focusable = !!(caps.focusMode && (caps.focusMode.includes("manual") || caps.focusMode.includes("single-shot")));
+  } catch (_) {}
+}
+
+// Tap the live view to (re)trigger focus. Single-shot where supported, else a
+// quick continuous re-lock. Shows a brief focus ring at the tap point.
+async function tapToFocus(view, clientX, clientY) {
+  const c = cams[view];
+  const track = c?.stream?.getVideoTracks?.()[0];
+  if (!track || !track.applyConstraints) return;
+  // visual focus ring
+  const wrap = c.wrap;
+  if (wrap) {
+    const r = wrap.getBoundingClientRect();
+    const ring = document.createElement("div");
+    ring.className = "focus-ring";
+    ring.style.left = (clientX - r.left) + "px";
+    ring.style.top = (clientY - r.top) + "px";
+    wrap.appendChild(ring);
+    setTimeout(() => ring.remove(), 700);
+  }
+  try {
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.includes("single-shot")) {
+      await track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] });
+      // return to continuous shortly after so it keeps tracking
+      setTimeout(() => track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {}), 1200);
+    } else if (caps.focusMode && caps.focusMode.includes("continuous")) {
+      // toggle to nudge a refocus
+      await track.applyConstraints({ advanced: [{ focusMode: "manual" }] }).catch(() => {});
+      track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+    }
+  } catch (_) {}
 }
 // Capture a work canvas from a view's camera, or open file picker (returns Promise<canvas|null>).
 function capture(view) {
@@ -892,10 +958,14 @@ async function idTick() {
 
 // Resume identifying after an auto-pause (button or tapping the camera view).
 on("#idResumeBtn", "click", startIdLoop);
-on("#idCameraWrap", "click", () => {
+on("#idCameraWrap", "click", (e) => {
   const c = cams.id;
   if (settings.autoScan && !idLoopActive && c && !c.usesFile) startIdLoop();
+  else tapToFocus("id", e.clientX, e.clientY);
 });
+// Tap-to-focus on the Add and Find camera views.
+on("#addCameraWrap", "click", (e) => { const c = cams.add; if (c && !c.usesFile) tapToFocus("add", e.clientX, e.clientY); });
+on("#findCameraWrap", "click", (e) => { const c = cams.find; if (c && !c.usesFile && $("#findVideo").hidden === false) tapToFocus("find", e.clientX, e.clientY); });
 
 // Capture button — only used in the file-fallback path (no live camera).
 on("#idCaptureBtn", "click", async () => {

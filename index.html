@@ -49,7 +49,7 @@
       <video id="findVideo" playsinline muted autoplay></video>
       <canvas class="preview" id="findPreview" hidden></canvas>
       <div class="overlay" id="findGuide">
-        <div class="guide-text">Spread the keys apart on a plain surface, then capture</div>
+        <div class="guide-text">Spread the keys apart on a plain surface · tap to focus · then capture</div>
       </div>
     </div>
     <div class="cam-controls">
@@ -76,13 +76,21 @@
         <svg viewBox="0 0 300 400" preserveAspectRatio="none">
           <rect x="60" y="70" width="180" height="260" rx="20" fill="none" stroke="rgba(245,185,66,.7)" stroke-width="2" stroke-dasharray="8 6"/>
         </svg>
-        <div class="guide-text">Capture 2–3 photos from slightly different angles</div>
+        <div class="guide-text">Tap to focus · capture 2–3 photos from slightly different angles</div>
       </div>
     </div>
     <div class="cam-controls">
       <button class="btn" id="addCaptureBtn">📸 Add photo</button>
     </div>
     <input type="file" accept="image/*" capture="environment" id="addFileInput" hidden />
+    <details class="tips"><summary>📷 Tips for sharp photos</summary>
+      <ul>
+        <li><strong>Focus:</strong> if it won't sharpen, move back ~8–10 in and zoom/step in — keys held too close can't focus. Tap the preview to refocus.</li>
+        <li><strong>Light:</strong> use soft, indirect light (face a window). Avoid the flash — it glares off metal.</li>
+        <li><strong>Background:</strong> lay the key flat on a plain, matte, contrasting surface (paper, cardstock).</li>
+        <li><strong>Angle:</strong> tilt slightly so light rakes across the cuts rather than reflecting straight back.</li>
+      </ul>
+    </details>
     <div class="thumbs" id="addThumbs"></div>
 
     <div class="card">
