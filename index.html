@@ -209,6 +209,14 @@
   <button class="btn secondary" id="keyMenuClose" style="margin-top:12px">Close</button>
 </dialog>
 
+<!-- Low-quality capture warning (enrollment) -->
+<dialog id="qualityDialog">
+  <div id="qualityBody" style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px"></div>
+  <p class="hint" style="margin-top:0">A sharp, well-lit photo of the key on a plain background gives the best recognition.</p>
+  <button class="btn" id="qualityRetake">↻ Retake photo</button>
+  <button class="btn secondary" id="qualityUse" style="margin-top:10px">Use it anyway</button>
+</dialog>
+
 <!-- Confirm before teaching a key (defeats any last-instant re-order) -->
 <dialog id="teachDialog">
   <h3 style="margin-top:0">Improve this key?</h3>

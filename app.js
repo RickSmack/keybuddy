@@ -215,6 +215,97 @@ function canvasToThumb(canvas, size = 160) {
   return c.toDataURL("image/jpeg", 0.7);
 }
 
+/* ---------- capture quality screening ----------
+   A poor photo (blurry, dark, blown-out, or no clear key) hurts matching and
+   can poison a key's fingerprints. Screen captures and warn before saving.
+   Returns { ok, score(0..1), issues:[...] }. Uses OpenCV when ready; a plain-
+   JS fallback still checks brightness + a rough sharpness proxy. */
+const BLUR_MIN = 60;      // Laplacian variance below this ≈ blurry
+const DARK_MIN = 45;      // mean brightness below this ≈ too dark
+const BRIGHT_MAX = 225;   // above this ≈ washed out / clipped
+function assessQuality(fullCanvas) {
+  const issues = [];
+  // downscale for a fast, resolution-independent read
+  const S = 256;
+  const c = document.createElement("canvas"); c.width = S; c.height = S;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(fullCanvas, 0, 0, S, S);
+
+  // --- brightness (both paths) ---
+  const data = ctx.getImageData(0, 0, S, S).data;
+  let sum = 0, clipped = 0;
+  const gray = new Float64Array(S * S);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const g = data[i] * .299 + data[i+1] * .587 + data[i+2] * .114;
+    gray[p] = g; sum += g; if (g >= 250) clipped++;
+  }
+  const mean = sum / (S * S);
+  if (mean < DARK_MIN) issues.push("too dark");
+  else if (mean > BRIGHT_MAX || clipped > S * S * 0.25) issues.push("too bright / glare");
+
+  // --- sharpness: variance of Laplacian ---
+  let lapVar = null;
+  if (cvReady) {
+    let src, g, lap, mm, sd;
+    try {
+      src = cv.imread(c);
+      g = new cv.Mat(); cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+      lap = new cv.Mat(); cv.Laplacian(g, lap, cv.CV_64F);
+      mm = new cv.Mat(); sd = new cv.Mat();
+      cv.meanStdDev(lap, mm, sd);
+      const s = sd.doubleAt(0, 0); lapVar = s * s;
+    } catch (_) { /* fall through */ }
+    finally { [src, g, lap, mm, sd].forEach((m) => { try { m && m.delete(); } catch (_) {} }); }
+  }
+  if (lapVar == null) {
+    // JS fallback: mean abs gradient as a sharpness proxy, scaled to ~Laplacian range
+    let gsum = 0;
+    for (let y = 1; y < S; y++) for (let x = 1; x < S; x++) {
+      const p = y * S + x;
+      gsum += Math.abs(gray[p] - gray[p - 1]) + Math.abs(gray[p] - gray[p - S]);
+    }
+    lapVar = (gsum / (S * S)) * 12; // rough scaling into a comparable range
+  }
+  if (lapVar < BLUR_MIN) issues.push("blurry / out of focus");
+
+  // --- key present & reasonably sized (OpenCV only) ---
+  if (cvReady) {
+    let src, g, edges, contours, hier;
+    try {
+      src = cv.imread(c);
+      g = new cv.Mat(); cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+      edges = new cv.Mat(); cv.threshold(g, edges, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+      contours = new cv.MatVector(); hier = new cv.Mat();
+      cv.findContours(edges, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      let bestArea = 0;
+      for (let i = 0; i < contours.size(); i++) bestArea = Math.max(bestArea, cv.contourArea(contours.get(i)));
+      const frac = bestArea / (S * S);
+      if (frac < 0.03) issues.push("no clear key / too small in frame");
+      else if (frac > 0.92) issues.push("key too close / fills frame");
+    } catch (_) {}
+    finally { [src, g, edges, hier].forEach((m) => { try { m && m.delete(); } catch (_) {} });
+      try { contours && contours.delete(); } catch (_) {} }
+  }
+
+  // score: start at 1, dock per issue; clamp
+  const score = Math.max(0, 1 - issues.length * 0.34);
+  return { ok: issues.length === 0, score, issues };
+}
+
+// Show a quality warning and resolve true if the user wants to keep the photo.
+const qualityDlg = $("#qualityDialog");
+function confirmLowQuality(assessment, thumb) {
+  return new Promise((resolve) => {
+    $("#qualityBody").innerHTML =
+      `<img src="${thumb}" alt="" style="width:72px;height:72px;border-radius:10px;object-fit:cover" />
+       <div><strong>Photo may be low quality</strong><ul style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted)">
+       ${assessment.issues.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul></div>`;
+    qualityDlg.showModal();
+    $("#qualityRetake").onclick = () => { qualityDlg.close(); resolve(false); };
+    $("#qualityUse").onclick = () => { qualityDlg.close(); resolve(true); };
+  });
+}
+
 // Otsu threshold on grayscale to isolate the key silhouette (assumes plain bg).
 function silhouette(canvas) {
   const ctx = canvas.getContext("2d");
@@ -925,10 +1016,15 @@ async function askTeachKey(id) {
   const wasScanning = idLoopActive;
   stopIdLoop(); // hold still while the dialog is open
 
+  // Screen the snapshot; if poor, warn inside this same confirmation.
+  const q = assessQuality(lastCanvas);
+  const warn = q.ok ? "" :
+    `<div style="margin-top:8px;color:var(--bad);font-size:13px">⚠️ Low quality: ${q.issues.map(escapeHtml).join(", ")}. Adding a poor photo can hurt recognition.</div>`;
+
   $("#teachDlgBody").innerHTML =
     `<img src="${thumb}" alt="" style="width:64px;height:64px;border-radius:10px;object-fit:cover" />
      <div><strong>${keyLabel(key)}</strong>${key.category ? "<br><span style='color:var(--muted);font-size:12px'>" + escapeHtml(key.category) + "</span>" : ""}</div>`;
-  $("#teachDlgText").textContent = `Add this photo to "${key.for || "Unidentified key"}" so it's recognized better next time? (${learned + 1}/5 learned)`;
+  $("#teachDlgText").innerHTML = `Add this photo to "${escapeHtml(key.for || "Unidentified key")}" so it's recognized better next time? (${learned + 1}/5 learned)${warn}`;
   teachDlg.showModal();
 
   const cleanup = () => {
@@ -941,7 +1037,7 @@ async function askTeachKey(id) {
       fresh.fingerprints = fresh.fingerprints || [];
       const l = fresh.fingerprints.filter((f) => f && f.source === "learn").length;
       if (l < 5) {
-        fresh.fingerprints.push({ ...probe, source: "learn", thumb });
+        fresh.fingerprints.push({ ...probe, source: "learn", thumb, quality: q.score });
         fresh.updatedAt = new Date().toISOString();
         await putKey(fresh);
         toast(`✓ Improved: ${fresh.for || "Unidentified key"} (${l + 1}/5 learned)`);
@@ -1292,8 +1388,13 @@ on("#addCaptureBtn", "click", async () => {
   if (!canvas) return;
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Processing…';
   try {
+    const q = assessQuality(canvas);
+    if (!q.ok) {
+      const keep = await confirmLowQuality(q, canvasToThumb(canvas));
+      if (!keep) return; // user chose to retake
+    }
     const fp = await fingerprint(canvas);
-    stagedPhotos.push({ canvas, thumb: canvasToThumb(canvas), fp });
+    stagedPhotos.push({ canvas, thumb: canvasToThumb(canvas), fp, quality: q.score });
     renderStagedThumbs();
   } finally {
     btn.disabled = false; btn.innerHTML = "📸 Add photo";
