@@ -1,41 +1,53 @@
 # Key Buddy — open items
 
-## Code-review findings — auto-capture (commit b9645cf), not yet fixed
+## Code-review findings — auto-capture (commit b9645cf)
 
 From a high-effort review of the QR-style auto-capture feature. Ordered by severity.
 
-### Correctness
-1. **Auto-capture fires during Edit** (`app.js` ~1654, `editKey`)
-   Editing a key (`editKey` → `showView("add")` → `startCamera("add")` → `startAddAuto()`)
-   starts the auto loop, so relabeling an existing key silently appends new auto-captured
-   photos to it. Fix: only arm auto-capture for NEW adds, not edits (e.g. gate `startAddAuto`
-   on `!editingId`, and re-evaluate when entering Add fresh).
+### Correctness — fixed 2026-07-21
+1. **Auto-capture fires during Edit** — FIXED. Auto-capture now starts OFF whenever you open
+   an existing key to edit it (`editKey` sets `addAutoSessionOn = false`); it no longer assumes
+   you want new photos just because you're relabeling. A new **Auto-capture** toggle on the Add/
+   Edit screen lets you turn it on for that session if you actually do want more shots.
 
-2. **Manual capture races the auto loop** (`app.js` ~1467, `#addCaptureBtn`)
-   The manual "Add photo" button and its `confirmLowQuality` modal don't pause the auto loop,
-   so a photo can auto-commit while the modal is open. Fix: `stopAddAuto()` on manual capture
-   start / while the modal is open, resume after.
+2. **Manual capture races the auto loop** — FIXED. `#addCaptureBtn` now pauses the auto loop
+   (`stopAddAuto()`) before capturing — covering the `confirmLowQuality` modal too — and resumes
+   it afterward only if it was running.
 
-3. **Motion gate misaligned with committed frame** (`app.js` ~1519)
-   `addFrameMoved` compares against the frame ~320ms ago, not the stability of the frame
-   actually committed; jitter between ticks resets the streak, and a motion-blurred frame can
-   still commit. Fix: measure stability of the capture frame itself (e.g. two quick reads).
+3. **Motion gate misaligned with committed frame** — FIXED. Right before firing, a new
+   `verifyAndCaptureAuto()` does one more close-interval (80ms) motion + quality re-check and
+   commits *that* frame, instead of trusting the ~320ms-old cross-tick comparison.
 
-4. **Awaited `fingerprint()` inside the tick may commit a stale frame** (`app.js` ~1531)
-   MobileNet inference takes hundreds of ms; the scene can change during it, but the committed
-   canvas/thumb is from before inference. Fix: snapshot + freeze preview at flash time.
+4. **Awaited `fingerprint()` inside the tick may commit a stale frame** — not changed. On
+   inspection this isn't a data-correctness bug (the canvas is already a frozen snapshot before
+   fingerprinting starts); the real gap is UX — the live preview doesn't visually freeze during
+   the ~hundreds-of-ms MobileNet inference. Still open if we want the polish: freeze `#addPreview`
+   (already in the DOM, unused) over the video at flash time, swap back after commit.
 
-5. **No cap on auto-captured photos** (`app.js` ~1528)
-   A steady/settled scene keeps arming and firing, accumulating unbounded near-duplicate photos
-   (each a full canvas + fingerprint + thumb). Fix: cap auto-adds per session (e.g. 5) and stop.
+5. **No cap on auto-captured photos** — FIXED. Auto-capture now stops itself after
+   `ADD_AUTO_MAX = 5` photos in a session (toggle flips off, hint explains why); flip it back on
+   to keep going.
 
 ### Cleanup
-6. **`addFrameMoved` duplicates `detectMotion()`** (`app.js` ~1545 vs ~890)
-   Same gray-downscale + abs-delta algorithm. Reuse `detectMotion` (parameterize size/threshold).
+6. **`addFrameMoved` duplicates `detectMotion()`** — FIXED. `detectMotion(video, prevFrame,
+   size, threshold)` is now a pure function; both the Identify loop and Add auto-capture call it
+   and keep their own baseline frame.
 
-7. **`assessQuality` double `cv.imread` every ~320ms** (`app.js` ~1524)
+7. **`assessQuality` double `cv.imread` every ~320ms** (`app.js` ~1524) — still open.
    Two separate OpenCV pipelines (Laplacian, then Otsu+findContours) per tick — battery drain
    on a phone. Fix: share one grayscale Mat across both checks.
+
+### New: Auto-capture on/off control
+Added a persistent **Auto-capture** toggle switch directly on the Add/Edit screen (next to the
+manual capture button), not just buried in Settings. It mirrors the Settings-page checkbox
+(`settings.autoCapture`) for the persisted default, but session state (`addAutoSessionOn`) is
+tracked separately so entering Edit can start it OFF without touching your saved preference, and
+the 5-photo cap can pause a session without silently flipping your global default.
+
+**Not yet verified on-device** — this environment has no camera/runtime to test `getUserMedia`
+against. Please try it on your phone: (a) edit an existing key and confirm auto-capture stays
+off until you flip the toggle, (b) fresh-add a key and confirm it stops itself after 5 photos,
+(c) tap manual "Add photo" mid-auto-loop and confirm no double-capture.
 
 ## Other backlog / ideas discussed
 - **Blade-vs-bow isolation** within a single key (cut profile currently uses the whole key).

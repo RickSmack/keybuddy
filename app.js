@@ -655,6 +655,7 @@ async function startCamera(view) {
       $("#idGuideText").textContent = "Tap Capture to take a photo";
     }
   }
+  if (view === "add") syncAddAutoToggle();
 }
 function stopCamera(view) {
   const c = cams[view];
@@ -886,23 +887,24 @@ function hideScanPaused() {
   if (btn) btn.hidden = true;
 }
 
-// Cheap frame-to-frame motion: mean absolute gray delta on a 32x32 downscale.
-function detectMotion(video) {
-  const S = 32;
-  const c = document.createElement("canvas"); c.width = S; c.height = S;
+// Cheap frame-to-frame motion: mean absolute gray delta on a downscale.
+// Stateless w.r.t. module globals — caller supplies the previous frame and
+// stores the returned one, so the Identify loop and Add auto-capture can
+// each track their own baseline instead of duplicating this algorithm.
+function detectMotion(video, prevFrame, size = 32, threshold = MOTION_THRESH) {
+  const c = document.createElement("canvas"); c.width = size; c.height = size;
   const ctx = c.getContext("2d");
-  ctx.drawImage(video, 0, 0, S, S);
-  const d = ctx.getImageData(0, 0, S, S).data;
-  const cur = new Uint8Array(S * S);
+  ctx.drawImage(video, 0, 0, size, size);
+  const d = ctx.getImageData(0, 0, size, size).data;
+  const cur = new Uint8Array(size * size);
   for (let i = 0, p = 0; i < d.length; i += 4, p++) cur[p] = (d[i] * .299 + d[i+1] * .587 + d[i+2] * .114) | 0;
   let moved = false;
-  if (motionPrev) {
+  if (prevFrame) {
     let sum = 0;
-    for (let p = 0; p < cur.length; p++) sum += Math.abs(cur[p] - motionPrev[p]);
-    if (sum / cur.length > MOTION_THRESH) moved = true;
+    for (let p = 0; p < cur.length; p++) sum += Math.abs(cur[p] - prevFrame[p]);
+    if (sum / cur.length > threshold) moved = true;
   }
-  motionPrev = cur;
-  return moved;
+  return { moved, frame: cur };
 }
 
 // Decide whether to auto-pause based on the user's settings.
@@ -929,7 +931,9 @@ async function idTick() {
     return;
   }
   // Motion tracking + settings-driven auto-pause.
-  if (detectMotion(c.video)) lastMotionAt = performance.now();
+  const motion = detectMotion(c.video, motionPrev);
+  motionPrev = motion.frame;
+  if (motion.moved) lastMotionAt = performance.now();
   const pauseReason = shouldPause();
   if (pauseReason) { pauseIdLoop(pauseReason); return; }
   idBusy = true;
@@ -1193,6 +1197,11 @@ function beginAddFromCapture() {
   if (lastCanvas && lastProbe) {
     pendingCapture = { canvas: lastCanvas, probe: lastProbe };
   }
+  // This is always a fresh add (never mid-edit) — make sure auto-capture
+  // isn't left off from a previous edit session.
+  editingId = null;
+  addAutoSessionOn = settings.autoCapture;
+  addAutoCount = 0;
   showView("add");
   if (pendingCapture) {
     stagedPhotos = [{ canvas: pendingCapture.canvas, thumb: canvasToThumb(pendingCapture.canvas), fp: pendingCapture.probe }];
@@ -1466,8 +1475,12 @@ async function commitAddPhoto(canvas, quality) {
 
 on("#addCaptureBtn", "click", async () => {
   const btn = $("#addCaptureBtn");
+  // Pause the auto loop for the manual shot (and while the low-quality
+  // confirm dialog is open) so it can't fire mid-capture; resume after.
+  const wasAutoRunning = addAutoActive;
+  if (wasAutoRunning) stopAddAuto();
   const canvas = await capture("add");
-  if (!canvas) return;
+  if (!canvas) { if (wasAutoRunning) startAddAuto(); return; }
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Processing…';
   try {
     const q = assessQuality(canvas);
@@ -1478,6 +1491,7 @@ on("#addCaptureBtn", "click", async () => {
     await commitAddPhoto(canvas, q.score);
   } finally {
     btn.disabled = false; btn.innerHTML = "📸 Add photo";
+    if (wasAutoRunning) startAddAuto();
   }
 });
 
@@ -1490,22 +1504,44 @@ let addAutoBusy = false;
 let addGoodStreak = 0;
 let addArmed = true;           // false right after a capture until re-framed
 let addAutoPrevFrame = null;   // for re-frame (motion) detection
+let addAutoSessionOn = settings.autoCapture; // whether auto-capture should run for the CURRENT add/edit session
+let addAutoCount = 0;          // photos auto-captured so far this session
 const ADD_AUTO_INTERVAL = 320; // ms between checks
 const ADD_GOOD_NEEDED = 3;     // consecutive good reads before firing
+const ADD_AUTO_MAX = 5;        // stop auto-capture after this many so it can't run forever
 
 function startAddAuto() {
   const c = cams.add;
-  if (!settings.autoCapture || addAutoActive || !c || c.usesFile) return;
+  if (!addAutoSessionOn || addAutoActive || !c || c.usesFile) return;
   addAutoActive = true; addGoodStreak = 0; addArmed = true; addAutoPrevFrame = null;
   setAddAutoHint("Point at the key — auto-capturing when it's sharp…");
+  syncAddAutoToggle();
   scheduleAddAuto(500);
 }
-function stopAddAuto() { addAutoActive = false; setAddAutoHint(""); }
+function stopAddAuto(msg = "") { addAutoActive = false; setAddAutoHint(msg); }
 function scheduleAddAuto(delay) { if (addAutoActive) setTimeout(addAutoTick, delay); }
 function setAddAutoHint(msg) {
   const el = $("#addAutoHint");
   if (el) { el.textContent = msg; el.hidden = !msg; }
 }
+// Reflects session on/off state in the Add-view switch (and hides it when
+// there's no live camera to auto-capture from).
+function syncAddAutoToggle() {
+  const t = $("#addAutoToggle");
+  if (t) t.checked = addAutoSessionOn;
+  const row = $("#addAutoToggleRow");
+  if (row) row.hidden = !!cams.add?.usesFile;
+}
+on("#addAutoToggle", "change", (e) => {
+  addAutoSessionOn = e.target.checked;
+  // Also update the persisted default so Settings stays in sync — but a
+  // session cap (below) intentionally does NOT touch this, since running out
+  // of shots isn't the user changing their mind about the default.
+  settings.autoCapture = addAutoSessionOn;
+  saveSettings();
+  const setBox = $("#setAutoCapture"); if (setBox) setBox.checked = addAutoSessionOn;
+  if (addAutoSessionOn) { addAutoCount = 0; startAddAuto(); } else { stopAddAuto(); }
+});
 async function addAutoTick() {
   if (!addAutoActive) return;
   const c = cams.add;
@@ -1526,9 +1562,23 @@ async function addAutoTick() {
       addGoodStreak++;
       setAddAutoHint(`Hold steady… ${addGoodStreak}/${ADD_GOOD_NEEDED}`);
       if (addGoodStreak >= ADD_GOOD_NEEDED) {
+        const committed = await verifyAndCaptureAuto(c.video);
+        if (!committed) {
+          // The frame moved or lost sharpness in the moment it took to
+          // double-check — stay armed and try again next tick instead of
+          // committing something we're not confident about.
+          addGoodStreak = ADD_GOOD_NEEDED - 1;
+          setAddAutoHint("Hold steady…");
+          return;
+        }
         addGoodStreak = 0; addArmed = false; // disarm until re-framed
-        flashAddCapture();
-        await commitAddPhoto(canvas, q.score);
+        addAutoCount++;
+        if (addAutoCount >= ADD_AUTO_MAX) {
+          addAutoSessionOn = false;
+          syncAddAutoToggle();
+          stopAddAuto(`✓ Captured ${ADD_AUTO_MAX} photos — auto-capture paused. Turn it back on for more, or add manually.`);
+          return;
+        }
         setAddAutoHint("✓ Captured — move to a new angle for another");
       }
     } else {
@@ -1541,21 +1591,27 @@ async function addAutoTick() {
     scheduleAddAuto(ADD_AUTO_INTERVAL);
   }
 }
-// Coarse frame-change detector (reuses the motion idea) for re-framing.
+// Coarse frame-change detector (reuses the Identify loop's motion algorithm) for re-framing.
 function addFrameMoved(video) {
-  const S = 24;
-  const cv2 = document.createElement("canvas"); cv2.width = S; cv2.height = S;
-  const ctx = cv2.getContext("2d"); ctx.drawImage(video, 0, 0, S, S);
-  const d = ctx.getImageData(0, 0, S, S).data;
-  const cur = new Uint8Array(S * S);
-  for (let i = 0, p = 0; i < d.length; i += 4, p++) cur[p] = (d[i]*.299 + d[i+1]*.587 + d[i+2]*.114) | 0;
-  let moved = false;
-  if (addAutoPrevFrame) {
-    let sum = 0; for (let p = 0; p < cur.length; p++) sum += Math.abs(cur[p] - addAutoPrevFrame[p]);
-    if (sum / cur.length > 12) moved = true;
-  }
-  addAutoPrevFrame = cur;
+  const { moved, frame } = detectMotion(video, addAutoPrevFrame, 24, 12);
+  addAutoPrevFrame = frame;
   return moved;
+}
+// Right before firing, re-read the frame a beat later and re-check motion +
+// quality — the streak that got us here was measured across ~320ms-apart
+// ticks, which doesn't guarantee THIS instant is stable, so a fresh close
+// double-check guards against committing a frame that moved or blurred
+// right as we were about to capture. Commits the freshest verified frame.
+async function verifyAndCaptureAuto(video) {
+  await new Promise((r) => setTimeout(r, 80));
+  const { moved } = detectMotion(video, addAutoPrevFrame, 24, 10);
+  if (moved) return false;
+  const canvas = toWorkCanvas(video, video.videoWidth, video.videoHeight);
+  const q = assessQuality(canvas);
+  if (!q.ok) return false;
+  flashAddCapture();
+  await commitAddPhoto(canvas, q.score);
+  return true;
 }
 function flashAddCapture() {
   const wrap = cams.add?.wrap;
@@ -1625,6 +1681,10 @@ function resetAddForm() {
   $("#addTitle").textContent = "Add a key";
   $("#addCancelBtn").hidden = true;
   renderStagedThumbs();
+  // Fresh add: auto-capture follows the user's saved default.
+  addAutoSessionOn = settings.autoCapture;
+  addAutoCount = 0;
+  syncAddAutoToggle();
 }
 
 async function editKey(id) {
@@ -1633,6 +1693,11 @@ async function editKey(id) {
   editingId = id;
   stagedPhotos = [];
   stagedLocations = (key.locations || []).slice();
+  // Editing an existing key shouldn't silently start taking new photos of it —
+  // auto-capture starts OFF here; flip the switch if you actually want more shots.
+  addAutoSessionOn = false;
+  addAutoCount = 0;
+  syncAddAutoToggle();
   $("#addTitle").textContent = "Edit key";
   $("#addFor").value = key.for || "";
   $("#addCategory").value = key.category || "";
